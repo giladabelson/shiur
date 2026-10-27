@@ -30,6 +30,9 @@ export class LocalMedia {
   /** The camera itself. */
   private rawCam: MediaStreamTrack | null = null;
   private blur: BackgroundBlur | null = null;
+  private blurWatch: number | undefined;
+  /** Called when blur was switched off automatically because the computer was too slow. */
+  onBlurAutoOff: () => void = () => {};
   screen: MediaStreamTrack | null = null;
   micMuted = false;
   prefs: MediaPrefs = loadPrefs();
@@ -110,6 +113,7 @@ export class LocalMedia {
       t.contentHint = "motion";
       this.blur = b;
       this.cam = t;
+      this.watchBlur(b);
       return null;
     } catch (e) {
       console.warn("blur", e);
@@ -120,7 +124,26 @@ export class LocalMedia {
     }
   }
 
+  /** If blur keeps the computer too busy, switch it off so the call stays smooth. */
+  private watchBlur(b: BackgroundBlur) {
+    clearInterval(this.blurWatch);
+    let slow = 0;
+    this.blurWatch = window.setInterval(() => {
+      if (this.blur !== b) { clearInterval(this.blurWatch); return; }
+      slow = b.msPerFrame > 45 ? slow + 1 : 0;
+      if (slow >= 8) {
+        clearInterval(this.blurWatch);
+        this.unwrapBlur();
+        this.prefs.blur = false;
+        savePrefs(this.prefs);
+        this.onChange();
+        this.onBlurAutoOff();
+      }
+    }, 1000);
+  }
+
   private unwrapBlur() {
+    clearInterval(this.blurWatch);
     if (this.blur) {
       this.blur.stop();
       this.blur = null;

@@ -296,6 +296,11 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       selfTile.classList.toggle("nocam", !media.cam);
     };
     media.onScreenEnded = () => { room.syncLocal(); drawControls(); };
+    media.onBlurAutoOff = () => {
+      room.syncLocal();
+      drawControls();
+      toast("המחשב עמוס, אז טשטוש הרקע כובה כדי שהשיחה תישאר חלקה", 6000);
+    };
 
     const controls = h("footer", { class: "controls" },
       micCtl, camCtl,
