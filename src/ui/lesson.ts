@@ -110,16 +110,18 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
   async function enterCall() {
     const room = new Room(roomId, role, name, media);
     (window as any).__room = room;
-    const board = new Board(roomId, room.peerId, {
-      broadcastOps: (m) => room.broadcastOps(m),
-      broadcastLive: (m) => room.broadcastLive(m),
+    const board = new Board(roomId, room.peerId, role, {
+      broadcastOps: (m, staffOnly) => room.broadcastOps(m, staffOnly),
+      broadcastLive: (m, staffOnly) => room.broadcastLive(m, staffOnly),
       sendTo: async (peerId, m) => room.peers.get(peerId)?.link.sendOpsPaced(m) ?? false,
+      peerIsStudent: (peerId) => room.peers.get(peerId)?.info.role === "student",
     });
     (window as any).__board = board;
     board.onNotice = (t) => toast(t);
     const view = new BoardView(board);
+    (window as any).__view = view;
     view.canDraw = () => board.canDraw(role);
-    const toolbar = buildToolbar(board, view, { isTeacher: role === "teacher", roomName: "שיעור" });
+    const toolbar = buildToolbar(board, view, { isTeacher: role === "teacher", isStaff: role !== "student", roomName: lessonFileName() });
     board.onChange = (what, strokeId) => {
       view.invalidate(what, strokeId);
       if (what !== "live" && what !== "stroke") toolbar.refresh();
@@ -492,6 +494,13 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       )));
     }
   }
+}
+
+/** "שיעור-יואב": the student's name comes from the teacher's link (?n=) or from the student's own name. */
+function lessonFileName(): string {
+  const q = new URLSearchParams(location.search);
+  const n = (q.get("n") || (q.get("role") ? "" : localStorage.getItem("shiur.name.student")) || "").trim();
+  return n ? `שיעור-${n.replace(/[\\/:*?"<>|]/g, "")}` : "שיעור";
 }
 
 function qualityText(q: Peer["link"]["quality"]): string {

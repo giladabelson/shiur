@@ -72,7 +72,7 @@ export function renderHome(root: HTMLElement) {
         h("div", { class: "student card" },
           h("div", { class: "student-name" }, s.name),
           h("div", { class: "student-actions" },
-            h("a", { class: "btn", href: roomUrl(s.room, "teacher") }, icon("cam", 18), " התחל שיעור"),
+            h("a", { class: "btn", href: `${roomUrl(s.room, "teacher")}&n=${encodeURIComponent(s.name)}` }, icon("cam", 18), " התחל שיעור"),
             h("button", { class: "btn ghost", onclick: () => copy(roomUrl(s.room)) }, icon("copy", 18), " לינק לתלמיד"),
             h("button", { class: "btn ghost", onclick: () => qrDialog(s.room, s.name) }, icon("ipad", 18), " חבר אייפד"),
             h("button", {

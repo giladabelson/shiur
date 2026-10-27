@@ -116,12 +116,13 @@ export class Room {
     return { mic: !!this.media.mic && !this.media.micMuted, cam: !!this.media.cam, screen: !!this.media.screen };
   }
 
-  broadcastOps(msg: object) {
-    for (const p of this.peers.values()) p.link.sendOps(msg);
+  /** staffOnly: skip students (used for the teacher's private pages). */
+  broadcastOps(msg: object, staffOnly = false) {
+    for (const p of this.peers.values()) if (!staffOnly || p.info.role !== "student") p.link.sendOps(msg);
   }
 
-  broadcastLive(msg: object) {
-    for (const p of this.peers.values()) p.link.sendLive(msg);
+  broadcastLive(msg: object, staffOnly = false) {
+    for (const p of this.peers.values()) if (!staffOnly || p.info.role !== "student") p.link.sendLive(msg);
   }
 
   private handleSignal(m: SignalMsg) {

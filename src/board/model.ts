@@ -1,7 +1,8 @@
 // Whiteboard state. Every device holds a full copy; ops are broadcast over the data channel and
 // merged with simple rules (union of ids, higher version wins), so any peer can rejoin and catch up.
 
-export type Tool = "pen" | "hl" | "line" | "rect" | "ellipse";
+export type Tool = "pen" | "hl" | "line" | "rect" | "ellipse" | "poly" | "arrow";
+export type Template = "blank" | "grid" | "lines" | "dots" | "mm";
 /** x, y in page units, pressure 0..1 */
 export type Pt = [number, number, number];
 
@@ -15,9 +16,13 @@ export interface Stroke {
   /** true when the input had no real pressure (mouse / finger) */
   sp: boolean;
   pts: Pt[];
+  /** dashed line */
+  dash?: boolean;
   del: boolean;
   /** version of the visibility flag; higher wins */
   dv: number;
+  /** version of points/colour (moved, resized or recoloured with the lasso); higher wins */
+  pv?: number;
   ts: number;
 }
 
@@ -33,6 +38,11 @@ export interface Page {
   w: number;
   h: number;
   bg?: PageBg;
+  /** paper template and its version */
+  tpl?: Template;
+  tv?: number;
+  /** teacher-only page: never sent to students */
+  priv?: boolean;
   del: boolean;
   dv: number;
 }
@@ -58,6 +68,8 @@ export type BoardOp =
   | { t: "b.page"; page: Page }
   | { t: "b.stroke"; s: Stroke }
   | { t: "b.vis"; items: { id: string; del: boolean; dv: number }[] }
+  | { t: "b.upd"; items: { id: string; pts: Pt[]; color: string; size: number; dash?: boolean; pv: number }[] }
+  | { t: "b.tpl"; page: string; tpl: Template; tv: number }
   | { t: "b.go"; page: string; ts: number }
   | { t: "b.lock"; on: boolean; ts: number }
   | { t: "b.sync"; state: BoardState };
@@ -78,6 +90,30 @@ export function applyOp(st: BoardState, op: BoardOp): boolean {
         }
       }
       return changed;
+    }
+    case "b.upd": {
+      let changed = false;
+      for (const it of op.items) {
+        const s = st.strokes[it.id];
+        if (s && it.pv > (s.pv ?? 0)) {
+          s.pts = it.pts;
+          s.color = it.color;
+          s.size = it.size;
+          s.dash = it.dash;
+          s.pv = it.pv;
+          changed = true;
+        }
+      }
+      return changed;
+    }
+    case "b.tpl": {
+      const p = st.pages[op.page];
+      if (p && op.tv > (p.tv ?? 0)) {
+        p.tpl = op.tpl;
+        p.tv = op.tv;
+        return true;
+      }
+      return false;
     }
     case "b.go":
       if (op.ts > st.current.ts && st.pages[op.page]) {
@@ -105,12 +141,18 @@ function mergePage(st: BoardState, p: Page): boolean {
     st.pages[p.id] = { ...p };
     return true;
   }
+  let changed = false;
   if (newer(p.dv, p.del, cur.dv, cur.del)) {
     cur.del = p.del;
     cur.dv = p.dv;
-    return true;
+    changed = true;
   }
-  return false;
+  if ((p.tv ?? 0) > (cur.tv ?? 0)) {
+    cur.tpl = p.tpl;
+    cur.tv = p.tv;
+    changed = true;
+  }
+  return changed;
 }
 
 function mergeStroke(st: BoardState, s: Stroke): boolean {
@@ -119,12 +161,21 @@ function mergeStroke(st: BoardState, s: Stroke): boolean {
     st.strokes[s.id] = { ...s, pts: s.pts.slice() };
     return true;
   }
+  let changed = false;
   if (newer(s.dv, s.del, cur.dv, cur.del)) {
     cur.del = s.del;
     cur.dv = s.dv;
-    return true;
+    changed = true;
   }
-  return false;
+  if ((s.pv ?? 0) > (cur.pv ?? 0)) {
+    cur.pts = s.pts.slice();
+    cur.color = s.color;
+    cur.size = s.size;
+    cur.dash = s.dash;
+    cur.pv = s.pv;
+    changed = true;
+  }
+  return changed;
 }
 
 export function mergeState(st: BoardState, other: BoardState): boolean {
@@ -140,6 +191,22 @@ export function mergeState(st: BoardState, other: BoardState): boolean {
     changed = true;
   }
   return changed;
+}
+
+/** Which page an op is about, so teacher-only (private) pages are never sent to students. */
+export function opPage(st: BoardState, op: any): string | null {
+  switch (op.t) {
+    case "b.page": return op.page.id;
+    case "b.stroke": case "b.temp": return op.s.page;
+    case "b.go": case "b.tpl": return op.page;
+    case "b.live": case "b.laser": return op.page;
+    case "b.vis": case "b.upd": return st.strokes[op.items[0]?.id]?.page ?? null;
+    default: return null;
+  }
+}
+
+export function isPrivate(st: BoardState, pageId: string | null): boolean {
+  return !!pageId && !!st.pages[pageId]?.priv;
 }
 
 export function livePages(st: BoardState): Page[] {

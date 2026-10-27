@@ -140,7 +140,8 @@ try {
   const after = await I.page.evaluate(() => document.querySelector(".zoomlbl").textContent);
   check(`pinch zoom works (${before} -> ${after})`, parseInt(after) > parseInt(before));
   check("finger did not draw", (await strokes(I.page)) === 4);
-  await I.page.click('button[aria-label="התאם למסך"]');
+  await I.page.click(".toolbar .zoomlbl");
+  await I.page.click('.pop button[aria-label="התאם למסך"]');
 
   // pencil hover shows cursor; laser with the pen
   await penHover(I.page, [[300, 400], [320, 410]]);
@@ -152,11 +153,15 @@ try {
   check("laser leaves no stroke", (await strokes(S.page)) === 4);
 
   // shapes + colors from the iPad
-  await I.page.click('button[aria-label="מלבן"]');
-  await I.page.click(".swatch >> nth=2");
+  await I.page.click('button[aria-label^="צורות"]');
+  await I.page.click('button[aria-label^="צורות"]');
+  await I.page.click('.pop button[aria-label="מלבן"]');
+  await I.page.click('.stylebtn');
+  await I.page.click(".pop .swatch >> nth=2");
   await penStroke(I.page, [[150, 480], [250, 560], [350, 620]]);
   await I.page.click('button[aria-label="עט (P)"]');
-  await I.page.click(".swatch >> nth=1");
+  await I.page.click('.stylebtn');
+  await I.page.click(".pop .swatch >> nth=1");
   await penStroke(I.page, curve(700, 450, 200, 50));
   check("shape + colored stroke synced", await until(async () => (await strokes(S.page)) === 6));
   await sleep(300);
@@ -183,6 +188,17 @@ try {
     await sleep(800);
     await S.shot("10-student-pdf");
     await I.shot("11-ipad-pdf");
+    // export the whole board as PDF from the teacher's laptop
+    const [dl] = await Promise.all([
+      T.page.waitForEvent("download", { timeout: 30000 }),
+      T.page.click('button[aria-label="ייצא את כל הלוח ל-PDF"]'),
+    ]);
+    const pdfPath = `${OUT}/export.pdf`;
+    await dl.saveAs(pdfPath);
+    const pdfText = fs.readFileSync(pdfPath, "latin1");
+    const pageCount = (pdfText.match(/\/Type\s*\/Page[^s]/g) || []).length;
+    check(`PDF export: file "${dl.suggestedFilename()}" with ${pageCount} pages`, pdfText.startsWith("%PDF") && pageCount === 3);
+    check("PDF file name has the student's name", dl.suggestedFilename().includes("יואב"));
     await S.page.click('button[aria-label="עמוד הבא"]');
     await sleep(800);
     check("page navigation syncs to iPad", await until(() => I.page.evaluate(() => window.__board.pages.findIndex((p) => p.id === window.__board.currentPage.id) === 2)));
@@ -218,7 +234,11 @@ try {
   await sleep(6000);
   await S.ctx.setOffline(false);
   check("student recovers after network blip", await until(async () => (await connected(S.page)) === 3, 30000));
-  await penStroke(I.page, [[300, 650], [500, 660]]);
+  await penStroke(I.page, [[300, 450], [500, 460]]);
+  const dbg = (pg) => pg.evaluate(() => JSON.stringify({ n: Object.values(window.__board.state.strokes).filter((s) => !s.del).length, cur: window.__board.currentPage.id, peers: [...window.__room.peers.values()].map((p) => [p.info.name, p.link.state, p.link.ops?.readyState, p.link.epoch]) }));
+  await sleep(3000);
+  log("ipad", await dbg(I.page));
+  log("student", await dbg(S.page));
   check("board still syncing after blip", await until(() => S.page.evaluate((n) => Object.values(window.__board.state.strokes).filter((s) => !s.del).length >= n, 7), 8000));
 
   // 9. Settings dialog shows connection quality
