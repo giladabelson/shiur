@@ -22,7 +22,14 @@ npm run dev        # http://localhost:8787
 npm run test:e2e   # בדיקה אוטומטית: מורה, תלמיד ואייפד בדפדפנים אמיתיים
 ```
 
-## העלאה לאוויר (חינם)
+## העלאה לאוויר ממחשב Windows (הכי פשוט)
+פותחים PowerShell ומריצים:
+```
+powershell -ExecutionPolicy Bypass -File scripts\deploy-windows.ps1
+```
+הסקריפט מתקין Node ו-Git אם חסרים, מוריד את הקוד, מתחבר ל-Cloudflare בדפדפן ומעלה את האתר. אפשר להריץ אותו שוב בכל פעם שרוצים לעדכן.
+
+## העלאה לאוויר ידנית (חינם)
 1. חשבון ב-Cloudflare.
 2. `npx wrangler login`, ואז `npm run deploy`.
 3. שרת TURN, שדרוש כשהרשת חוסמת חיבור ישיר:
