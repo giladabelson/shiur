@@ -162,7 +162,7 @@ export class BoardView {
   private penMode = false;
   private drawing: (LiveStroke & { pointerId: number; sentUpTo: number; startedAt: number; pointerType: string }) | null = null;
   private predicted: Pt[] = [];
-  private erasing: { pointerId: number; ids: Set<string> } | null = null;
+  private erasing: { pointerId: number; ids: Set<string>; last: [number, number] | null } | null = null;
   private touches = new Map<number, { x: number; y: number }>();
   private gesture: { startDist: number; startScale: number; cx: number; cy: number; ox: number; oy: number; px: number; py: number } | null = null;
   private panning: { pointerId: number; x: number; y: number; ox: number; oy: number } | null = null;
@@ -185,7 +185,15 @@ export class BoardView {
     this.loop();
   }
 
-  invalidate(what: "all" | "live" | "page" | "lock") {
+  private pendingAdds: string[] = [];
+
+  invalidate(what: "all" | "live" | "page" | "lock" | "stroke", strokeId?: string) {
+    if (what === "stroke" && strokeId) {
+      // A new stroke is drawn on top of the existing base layer instead of redrawing everything.
+      if (!this.baseDirty) this.pendingAdds.push(strokeId);
+      this.topDirty = true;
+      return;
+    }
     if (what === "all" || what === "page") {
       this.baseDirty = true;
       // Strokes can change visibility; drop cached paths for strokes no longer visible.
@@ -262,7 +270,10 @@ export class BoardView {
     }
     if (this.board.tick(performance.now()) || this.board.lasers.size) this.topDirty = true;
     this.flushLive();
-    if (this.baseDirty) this.drawBase();
+    if (this.baseDirty) {
+      this.pendingAdds = [];
+      this.drawBase();
+    } else if (this.pendingAdds.length) this.drawAdds();
     if (this.topDirty) this.drawTop();
   };
 
@@ -304,6 +315,22 @@ export class BoardView {
     ctx.clip();
     for (const s of this.board.strokes(p.id)) drawStroke(ctx, s, this.paths, s.id);
     ctx.restore();
+  }
+
+  private drawAdds() {
+    const ctx = this.bctx;
+    const p = this.page;
+    this.applyTransform(ctx);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, p.w, p.h);
+    ctx.clip();
+    for (const id of this.pendingAdds) {
+      const s = this.board.state.strokes[id];
+      if (s && !s.del && s.page === p.id) drawStroke(ctx, s, this.paths, s.id);
+    }
+    ctx.restore();
+    this.pendingAdds = [];
   }
 
   private drawTop() {
@@ -441,7 +468,7 @@ export class BoardView {
       return;
     }
     if (this.tool === "eraser") {
-      this.erasing = { pointerId: e.pointerId, ids: new Set() };
+      this.erasing = { pointerId: e.pointerId, ids: new Set(), last: null };
       this.eraseAt(x, y);
       return;
     }
@@ -602,9 +629,17 @@ export class BoardView {
   private eraseAt(x: number, y: number) {
     if (!this.erasing) return;
     const r = this.eraserRadius();
+    // Sample along the path since the last event so a fast swipe doesn't skip strokes.
+    const from = this.erasing.last ?? [x, y];
+    this.erasing.last = [x, y];
+    const dist = Math.hypot(x - from[0], y - from[1]);
+    const steps = Math.max(1, Math.ceil(dist / (r * 0.75)));
+    const samples: [number, number][] = [];
+    for (let i = 1; i <= steps; i++) samples.push([from[0] + ((x - from[0]) * i) / steps, from[1] + ((y - from[1]) * i) / steps]);
     const hits: string[] = [];
     for (const s of this.board.strokes(this.page.id)) {
-      if (!this.erasing.ids.has(s.id) && hitStroke(s, x, y, r)) hits.push(s.id);
+      if (this.erasing.ids.has(s.id)) continue;
+      if (samples.some(([sx, sy]) => hitStroke(s, sx, sy, r))) hits.push(s.id);
     }
     if (hits.length) {
       for (const id of hits) this.erasing.ids.add(id);

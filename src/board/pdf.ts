@@ -48,7 +48,10 @@ export async function imageSize(data: ArrayBuffer, mime: string) {
 // Rendered backgrounds, kept small: iPad Safari has a tight total canvas memory budget.
 const cache = new Map<string, { canvas: HTMLCanvasElement | ImageBitmap; width: number }>();
 const pending = new Map<string, Promise<void>>();
-const MAX_CACHE = 6;
+// iPad Safari reloads the tab when total canvas memory gets too high, so keep this small there.
+const IS_TOUCH = typeof navigator !== "undefined" && navigator.maxTouchPoints > 1;
+const MAX_CACHE = IS_TOUCH ? 3 : 6;
+const MAX_PX = IS_TOUCH ? 2048 : 3200;
 
 function remember(key: string, v: { canvas: HTMLCanvasElement | ImageBitmap; width: number }) {
   cache.delete(key);
@@ -70,7 +73,7 @@ export function getBackground(
   onReady: () => void,
 ): HTMLCanvasElement | ImageBitmap | null {
   const key = `${bg.asset}:${bg.index}`;
-  const bucket = Math.min(3200, Math.max(800, 2 ** Math.ceil(Math.log2(wantPx))));
+  const bucket = Math.min(MAX_PX, Math.max(800, 2 ** Math.ceil(Math.log2(wantPx))));
   const hit = cache.get(key);
   if (hit && (hit.width >= bucket || bg.kind === "image")) {
     remember(key, hit);

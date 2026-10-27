@@ -118,7 +118,7 @@ a { color: #93c5fd; }
 .ibtn.floating { position: absolute; bottom: 10px; inset-inline-end: 10px; background: rgba(15,23,42,.7); }
 
 .toolbar {
-  display: flex; gap: 6px; padding: 6px; background: var(--panel); overflow-x: auto; align-items: center;
+  display: flex; flex-wrap: wrap; gap: 4px 6px; padding: 6px; background: var(--panel); align-items: center;
   scrollbar-width: thin; -webkit-user-select: none; user-select: none;
 }
 .tgroup { display: flex; gap: 2px; align-items: center; padding-inline-end: 6px; border-inline-end: 1px solid #334155; flex-shrink: 0; }

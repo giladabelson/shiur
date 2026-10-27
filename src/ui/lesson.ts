@@ -87,7 +87,11 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
     },
       h("h1", null, role === "ipad" ? "חיבור האייפד לשיעור" : "בדיקה לפני השיעור"),
       role === "ipad"
-        ? h("p", { class: "muted" }, "באייפד המיקרופון והרמקול כבויים כדי שלא יהיה הד עם המחשב. כאן כותבים על הלוח עם העט, ואפשר גם לשתף את מסך האייפד.")
+        ? h("div", { class: "muted ipad-tips" },
+          h("p", null, "באייפד המיקרופון והרמקול כבויים כדי שלא יהיה הד עם המחשב. כאן כותבים על הלוח עם העט."),
+          h("p", null, "חשוב: כדי שהעט לא יפספס קווים, כבה את Scribble: הגדרות ← Apple Pencil ← Scribble (כבוי)."),
+          h("p", null, "טיפ: נעילה אוטומטית ← אף פעם, והאייפד מחובר לחשמל."),
+        )
         : null,
       h("div", { class: "preview-wrap" }, preview, meter),
       h("label", { class: "field" }, h("span", null, "שם"), nameInput),
@@ -116,9 +120,9 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
     const view = new BoardView(board);
     view.canDraw = () => board.canDraw(role);
     const toolbar = buildToolbar(board, view, { isTeacher: role === "teacher", roomName: "שיעור" });
-    board.onChange = (what) => {
-      view.invalidate(what);
-      if (what !== "live") toolbar.refresh();
+    board.onChange = (what, strokeId) => {
+      view.invalidate(what, strokeId);
+      if (what !== "live" && what !== "stroke") toolbar.refresh();
       if (what === "lock") {
         updateLockBanner();
         if (role === "student") toast(board.state.lock.on ? "המורה נעל את הלוח" : "אפשר לכתוב על הלוח");

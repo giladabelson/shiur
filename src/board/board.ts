@@ -46,7 +46,7 @@ export class Board {
   private requested = new Map<string, number>();
   private haveAssets = new Set<string>();
   /** Called with what changed so the view can redraw only what it needs. */
-  onChange: (what: "all" | "live" | "page" | "lock") => void = () => {};
+  onChange: (what: "all" | "live" | "page" | "lock" | "stroke", strokeId?: string) => void = () => {};
   onNotice: (text: string) => void = () => {};
 
   constructor(readonly roomId: string, readonly me: string, private net: BoardTransport) {}
@@ -69,9 +69,16 @@ export class Board {
   private local(op: BoardOp) {
     if (applyOp(this.state, op)) {
       this.persist();
-      this.onChange(op.t === "b.go" ? "page" : op.t === "b.lock" ? "lock" : "all");
+      this.notify(op);
     }
     this.net.broadcastOps(op);
+  }
+
+  private notify(op: BoardOp) {
+    if (op.t === "b.go") this.onChange("page");
+    else if (op.t === "b.lock") this.onChange("lock");
+    else if (op.t === "b.stroke") this.onChange("stroke", op.s.id);
+    else this.onChange("all");
   }
 
   // ---------- pages ----------
@@ -353,7 +360,7 @@ export class Board {
       if (op.t === "b.stroke") this.live.delete(op.s.id);
       if (applyOp(this.state, op)) {
         this.persist();
-        this.onChange(op.t === "b.go" ? "page" : op.t === "b.lock" ? "lock" : "all");
+        this.notify(op);
         if (op.t === "b.page" || op.t === "b.sync") void this.checkAssets();
       }
     }

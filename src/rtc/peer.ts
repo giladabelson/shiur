@@ -368,12 +368,14 @@ export class PeerLink {
         q.limit = s.qualityLimitationReason;
       }
     });
+    // "bandwidth" is reported briefly whenever the encoder ramps up; only surface it when the link is really thin.
+    if (q.limit === "bandwidth" && (q.outKbps ?? 0) > 1200) delete q.limit;
     if (lost + recv > 0) q.lossPct = Math.round((1000 * lost) / (lost + recv)) / 10;
     if (dt > 0) q.inKbps = Math.round((8 * inBytes) / dt);
     const connected = this.pc.connectionState === "connected";
     if (!connected) q.level = "poor";
     else if ((q.rttMs ?? 0) > 400 || (q.lossPct ?? 0) > 8) q.level = "poor";
-    else if ((q.rttMs ?? 0) > 200 || (q.lossPct ?? 0) > 2 || q.limit) q.level = "fair";
+    else if ((q.rttMs ?? 0) > 200 || (q.lossPct ?? 0) > 2 || q.limit === "cpu") q.level = "fair";
     else q.level = "good";
     this.quality = q;
     this.onQuality();
