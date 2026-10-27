@@ -814,11 +814,13 @@ export class BoardView {
     try { this.top.setPointerCapture(e.pointerId); } catch { /* ignore */ }
     const [x, y] = this.toPage(e.clientX, e.clientY);
 
-    if (this.tool === "laser") {
+    // The eraser end / eraser button of a Windows stylus (Lenovo, Surface) erases whatever tool is selected.
+    const penEraser = e.pointerType === "pen" && (e.buttons & 32) !== 0;
+    if (this.tool === "laser" && !penEraser) {
       this.laserQueued = { x, y };
       return;
     }
-    if (this.tool === "lasso") {
+    if (this.tool === "lasso" && !penEraser) {
       const hit = this.selHit(x, y);
       if (hit) {
         const anchor: [number, number] = hit === "move" ? [x, y] : hit;
@@ -832,7 +834,7 @@ export class BoardView {
       return;
     }
     if (this.sel) this.clearSelection();
-    if (this.tool === "eraser") {
+    if (this.tool === "eraser" || penEraser) {
       this.erasing = { pointerId: e.pointerId, ids: new Set(), added: [], last: null };
       this.eraseAt(x, y);
       return;
