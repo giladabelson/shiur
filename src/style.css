@@ -223,3 +223,5 @@ a { color: #93c5fd; }
 .desmos-dlg[open] { display: flex; }
 .desmos-head { align-items: center; }
 .desmos-host { flex: 1; min-height: 0; background: #fff; border-radius: 8px; overflow: hidden; }
+
+.btn.ghost.on { background: #1e3a8a; }

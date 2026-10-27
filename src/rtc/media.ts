@@ -1,10 +1,13 @@
-// Local camera / mic / screen capture, with device selection.
+// Local camera / mic / screen capture, with device selection and optional background blur.
+
+import { BackgroundBlur, preloadBlur } from "./blur";
 
 export interface MediaPrefs {
   micId?: string;
   camId?: string;
   speakerId?: string;
   facing?: "user" | "environment";
+  blur?: boolean;
 }
 
 const PREFS_KEY = "shiur.media";
@@ -22,7 +25,11 @@ export const canShareScreen = () =>
 
 export class LocalMedia {
   mic: MediaStreamTrack | null = null;
+  /** The track sent to others (blurred when blur is on). */
   cam: MediaStreamTrack | null = null;
+  /** The camera itself. */
+  private rawCam: MediaStreamTrack | null = null;
+  private blur: BackgroundBlur | null = null;
   screen: MediaStreamTrack | null = null;
   micMuted = false;
   prefs: MediaPrefs = loadPrefs();
@@ -63,14 +70,76 @@ export class LocalMedia {
       if (this.prefs.camId) video.deviceId = { ideal: this.prefs.camId };
       else if (this.prefs.facing) video.facingMode = this.prefs.facing;
       const s = await navigator.mediaDevices.getUserMedia({ video });
-      this.cam = s.getVideoTracks()[0];
-      this.cam.contentHint = "motion";
-      this.cam.onended = () => { this.cam = null; this.onChange(); };
+      const raw = s.getVideoTracks()[0];
+      raw.contentHint = "motion";
+      raw.onended = () => { this.stopTrack("cam"); this.onChange(); };
+      this.rawCam = raw;
+      this.cam = raw;
+      if (this.prefs.blur) await this.wrapBlur();
       this.onChange();
       return null;
     } catch (e) {
       return errText(e);
     }
+  }
+
+  get blurOn() {
+    return !!this.prefs.blur;
+  }
+
+  /** Turns background blur on/off (also for the current camera). Returns an error text or null. */
+  async setBlur(on: boolean): Promise<string | null> {
+    this.prefs.blur = on;
+    savePrefs(this.prefs);
+    if (!this.rawCam) return null;
+    let err: string | null = null;
+    if (on) err = await this.wrapBlur();
+    else this.unwrapBlur();
+    this.onChange();
+    return err;
+  }
+
+  private async wrapBlur(): Promise<string | null> {
+    const raw = this.rawCam;
+    if (!raw) return null;
+    this.unwrapBlur();
+    const b = new BackgroundBlur();
+    try {
+      const t = await b.apply(raw);
+      if (this.rawCam !== raw) { b.stop(); return null; } // camera changed meanwhile
+      t.contentHint = "motion";
+      this.blur = b;
+      this.cam = t;
+      return null;
+    } catch (e) {
+      console.warn("blur", e);
+      b.stop();
+      this.prefs.blur = false;
+      savePrefs(this.prefs);
+      return "טשטוש הרקע לא נתמך במכשיר הזה";
+    }
+  }
+
+  private unwrapBlur() {
+    if (this.blur) {
+      this.blur.stop();
+      this.blur = null;
+      if (this.cam && this.cam !== this.rawCam) this.cam.stop();
+    }
+    this.cam = this.rawCam;
+  }
+
+  /** Real camera device id (the blurred track doesn't carry it). */
+  camDeviceId(): string {
+    return this.rawCam?.getSettings().deviceId ?? "";
+  }
+
+  blurStats() {
+    return this.blur ? { ms: Math.round(this.blur.msPerFrame * 10) / 10, mode: this.blur.mode } : null;
+  }
+
+  preloadBlur() {
+    if (this.prefs.blur) preloadBlur();
   }
 
   stopCam() {
@@ -114,6 +183,13 @@ export class LocalMedia {
   }
 
   private stopTrack(k: "mic" | "cam" | "screen") {
+    if (k === "cam") {
+      this.unwrapBlur();
+      if (this.rawCam) { this.rawCam.onended = null; this.rawCam.stop(); }
+      this.rawCam = null;
+      this.cam = null;
+      return;
+    }
     const t = this[k];
     if (t) {
       t.onended = null;

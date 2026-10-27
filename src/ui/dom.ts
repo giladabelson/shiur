@@ -89,6 +89,7 @@ const P: Record<string, string> = {
   graph: '<path d="M3 3v18h18"/><path d="M6 16c3-8 5 2 8-6s4 4 5 2"/>',
   eye: '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
   dash: '<path d="M3 12h3M9 12h3M15 12h3M21 12h0"/>',
+  blur: '<circle cx="12" cy="9" r="3.2"/><path d="M6.5 19a5.5 5.5 0 0 1 11 0"/><circle cx="3.5" cy="5" r=".9" fill="currentColor"/><circle cx="20.5" cy="5" r=".9" fill="currentColor"/><circle cx="3.5" cy="12" r=".9" fill="currentColor"/><circle cx="20.5" cy="12" r=".9" fill="currentColor"/><circle cx="3.5" cy="19" r=".9" fill="currentColor"/><circle cx="20.5" cy="19" r=".9" fill="currentColor"/>',
   dots: '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
 };
 

@@ -29,6 +29,7 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
   const camSel = h("select", { class: "input" });
   const micBtn = h("button", { class: "btn ghost", type: "button" });
   const camBtn = h("button", { class: "btn ghost", type: "button" });
+  const blurBtn = h("button", { class: "btn ghost", type: "button" });
   const joinBtn = h("button", { class: "btn big", type: "submit" }, "הצטרף לשיעור");
   let meterStop: (() => void) | null = null;
 
@@ -37,14 +38,26 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
     camBtn.replaceChildren(icon(camOn ? "cam" : "camOff", 18), camOn ? " מצלמה פועלת" : " מצלמה כבויה");
     micBtn.classList.toggle("off", !micOn);
     camBtn.classList.toggle("off", !camOn);
+    blurBtn.replaceChildren(icon("blur", 18), media.blurOn ? " רקע מטושטש" : " טשטוש רקע");
+    blurBtn.classList.toggle("on", media.blurOn);
   };
+  blurBtn.onclick = async () => {
+    blurBtn.disabled = true;
+    if (!media.blurOn) blurBtn.replaceChildren(icon("blur", 18), " טוען…");
+    const e = await media.setBlur(!media.blurOn);
+    if (e) err.textContent = e;
+    preview.srcObject = media.cam ? new MediaStream([media.cam]) : null;
+    blurBtn.disabled = false;
+    drawToggles();
+  };
+  media.preloadBlur();
 
   const fillDevices = async () => {
     const d = await listDevices();
     micSel.replaceChildren(...d.mics.map((m, i) => h("option", { value: m.deviceId }, m.label || `מיקרופון ${i + 1}`)));
     camSel.replaceChildren(...d.cams.map((c, i) => h("option", { value: c.deviceId }, c.label || `מצלמה ${i + 1}`)));
     if (media.mic) micSel.value = media.mic.getSettings().deviceId ?? "";
-    if (media.cam) camSel.value = media.cam.getSettings().deviceId ?? "";
+    if (media.cam) camSel.value = media.camDeviceId();
   };
 
   const refreshPreview = async () => {
@@ -95,7 +108,7 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
         : null,
       h("div", { class: "preview-wrap" }, preview, meter),
       h("label", { class: "field" }, h("span", null, "שם"), nameInput),
-      h("div", { class: "row" }, micBtn, camBtn),
+      h("div", { class: "row" }, micBtn, camBtn, role !== "ipad" ? blurBtn : null),
       h("label", { class: "field" }, h("span", null, "מיקרופון"), micSel),
       h("label", { class: "field" }, h("span", null, "מצלמה"), camSel),
       err,
@@ -227,6 +240,15 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       room.syncLocal();
       drawControls();
     }, "ctl");
+    const blurCtl = iconBtn("blur", "טשטוש רקע", async () => {
+      blurCtl.classList.add("busy");
+      const e = await media.setBlur(!media.blurOn);
+      blurCtl.classList.remove("busy");
+      if (e) toast(e);
+      else toast(media.blurOn ? "הרקע שלך מטושטש" : "טשטוש הרקע כבוי");
+      room.syncLocal();
+      drawControls();
+    }, "ctl");
     const flipCtl = iconBtn("flip", "החלף מצלמה (קדמית / אחורית)", () => {
       media.prefs.facing = media.prefs.facing === "environment" ? "user" : "environment";
       media.prefs.camId = undefined;
@@ -264,6 +286,8 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       micCtl.classList.toggle("off", !micLive);
       camCtl.replaceChildren(icon(media.cam ? "cam" : "camOff"));
       camCtl.classList.toggle("off", !media.cam);
+      blurCtl.classList.toggle("on", media.blurOn);
+      blurCtl.hidden = !media.cam;
       screenCtl.classList.toggle("on", !!media.screen);
       screenCtl.title = media.screen ? "הפסק שיתוף" : role === "ipad" ? "שתף את מסך האייפד" : "שתף מסך או חלון";
       speakerCtl.replaceChildren(icon(speakerOn ? "speaker" : "speakerOff"));
@@ -275,6 +299,7 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
 
     const controls = h("footer", { class: "controls" },
       micCtl, camCtl,
+      role !== "ipad" ? blurCtl : null,
       role === "ipad" ? flipCtl : null,
       canShareScreen() ? screenCtl : null,
       speakerCtl, chatCtl,
@@ -458,7 +483,7 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
             media.prefs.micId = id; savePrefs(media.prefs);
             void media.startMic().then(() => room.syncLocal());
           }) ?? "",
-          mk("מצלמה", d.cams, media.cam?.getSettings().deviceId ?? "", (id) => {
+          mk("מצלמה", d.cams, media.camDeviceId(), (id) => {
             media.prefs.camId = id; savePrefs(media.prefs);
             void media.startCam().then(() => room.syncLocal());
           }) ?? "",
@@ -466,6 +491,10 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
             speakerSink = id;
             for (const a of audioBox.querySelectorAll("audio")) void (a as any).setSinkId(id).catch(() => {});
           }) : null) ?? "",
+          (() => {
+            const st = media.blurStats();
+            return st ? h("p", { class: "muted small" }, `טשטוש רקע פעיל · ${st.ms}ms לפריים`) : "";
+          })(),
           h("h3", null, "איכות החיבור"),
           ...(conn.length ? conn : [h("p", { class: "muted" }, "אין עדיין משתתפים מחוברים")]),
           h("p", { class: "muted small" }, "\"ישיר\" = הווידאו עובר ישר ביניכם (הכי מהיר). \"דרך שרת\" = עובר דרך שרת עזר כי הרשת חוסמת חיבור ישיר."),
