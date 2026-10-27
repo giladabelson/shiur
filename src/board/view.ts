@@ -284,6 +284,8 @@ export class BoardView {
   size = 3.5;
   dash = false;
   eraserMode: "stroke" | "partial" = "stroke";
+  /** Eraser radius in screen pixels (the same on every zoom level). */
+  eraserPx = 18;
   laserDot = false;
   autoShape = true;
   /** Whether this user may draw right now (lock). */
@@ -613,7 +615,7 @@ export class BoardView {
   }
 
   private eraserRadius() {
-    return (this.eraserMode === "partial" ? 8 : 10) / this.scale;
+    return this.eraserPx / this.scale;
   }
 
   // ---------- selection ----------

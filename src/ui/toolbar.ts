@@ -10,6 +10,8 @@ import { openDesmos } from "./desmos";
 const COLORS = ["#1f2937", "#2563eb", "#dc2626", "#16a34a", "#ea580c", "#9333ea", "#0891b2", "#db2777", "#ca8a04", "#ffffff"];
 const HL_COLORS = ["#facc15", "#4ade80", "#60a5fa", "#f472b6", "#fb923c"];
 const SIZES = [2, 3.5, 6, 10];
+const ERASER_KEY = "shiur.eraser";
+const ERASER_SIZES = [{ px: 10, label: "קטן" }, { px: 18, label: "בינוני" }, { px: 32, label: "גדול" }];
 const SHAPES: { id: ShapeKind; icon: string; label: string }[] = [
   { id: "line", icon: "line", label: "קו ישר" },
   { id: "arrow", icon: "arrow", label: "חץ" },
@@ -76,6 +78,10 @@ export function buildToolbar(board: Board, view: BoardView, opts: { isTeacher: b
   const styleBtn = h("button", { class: "ibtn stylebtn", type: "button", title: "צבע ועובי", "aria-label": "צבע ועובי" }, h("span", { class: "dot" }));
   const fileInput = h("input", { type: "file", accept: "application/pdf,image/*", hidden: true }) as HTMLInputElement;
   let favs = loadFavs();
+  try {
+    const px = Number(localStorage.getItem(ERASER_KEY));
+    if (ERASER_SIZES.some((z) => z.px === px)) view.eraserPx = px;
+  } catch { /* ignore */ }
   const favBtns: HTMLButtonElement[] = [];
 
   fileInput.addEventListener("change", async () => {
@@ -136,6 +142,12 @@ export function buildToolbar(board: Board, view: BoardView, opts: { isTeacher: b
     label("מחק"),
     choice("מוחק קו שלם", view.eraserMode === "stroke", () => { view.eraserMode = "stroke"; closePop(); }),
     choice("מחק חלקי (רק איפה שעוברים)", view.eraserMode === "partial", () => { view.eraserMode = "partial"; closePop(); }),
+    label("גודל המחק"),
+    ...ERASER_SIZES.map((z) => choice(z.label, view.eraserPx === z.px, () => {
+      view.eraserPx = z.px;
+      try { localStorage.setItem(ERASER_KEY, String(z.px)); } catch { /* ignore */ }
+      closePop();
+    })),
   );
   const laserMenu = () => h("div", null,
     label("לייזר"),
