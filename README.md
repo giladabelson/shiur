@@ -1,42 +1,77 @@
-# שיעור: אפליקציית שיעורים פרטיים
+# shiur
 
-שיחת וידאו ישירה (P2P) בין מורה לתלמיד, לוח משותף שמותאם לעט של האייפד, שיתוף מסך וצ'אט. התלמיד נכנס מקישור, בלי להתקין כלום.
+A browser-based private tutoring room: live video call plus a shared pen-friendly whiteboard, built for teaching physics and math with an iPad and Apple Pencil.
 
-## מה יש
-- וידאו וקול ישירים בין המכשירים (WebRTC), עם חזרה אוטומטית אחרי ניתוק או רענון.
-- לוח משותף: עט רגיש ללחץ, מרקר, קו, מלבן, אליפסה, מחק, לייזר, ביטול וביצוע מחדש, עמודים, העלאת PDF ותמונות, שמירת עמוד כתמונה, ונעילה (רק המורה כותב).
-- האייפד מצטרף כמכשיר שלישי: כותב על הלוח עם העט, בלי מיקרופון ורמקול כדי שלא יהיה הד. ב-iPadOS 27 אפשר גם לשתף ממנו את המסך.
-- שיתוף מסך או חלון מהמחשב. ב-Windows אפשר לשתף את החלון של מקלט AirPlay כמו AirServer או UxPlay.
-- צ'אט, טיימר לשיעור, מחוון איכות חיבור, בחירת מצלמה, מיקרופון ורמקול.
-- לינק קבוע לכל תלמיד, ו-QR לחיבור האייפד.
+## What it does
 
-## ארכיטקטורה
-- `worker/index.ts`: Cloudflare Worker ו-Durable Object לכל חדר. השרת רק מעביר את הודעות פתיחת השיחה (signaling) ומחזיר פרטי TURN זמניים. הווידאו עצמו לא עובר דרכו.
-- `src/rtc/`: חיבור ה-WebRTC. כל מכשיר מתחבר ישירות לכל השאר, וההתחברות נעשית בשיטת perfect negotiation: רק צד אחד פותח במשא ומתן, וכשיש בכל זאת התנגשות הצד ה"מנומס" מוותר. יש ICE restart, טיימר שמזהה חיבור תקוע, ומספרי epoch לבנייה מחדש.
-- `src/board/`: הלוח. מבוסס על perfect-freehand וקוראי PDF של pdf.js. הוא מסתנכרן בין המכשירים בערוץ נתונים ישיר (RTCDataChannel) ונשמר בדפדפן (IndexedDB).
+- Direct peer-to-peer video and audio between teacher and student (WebRTC), with automatic recovery after a disconnect or page reload.
+- Shared whiteboard tuned for a stylus: pressure-sensitive pen, highlighter, shapes with shape recognition, lasso, partial eraser, disappearing ink, laser pointer, pages, paper templates and axes.
+- PDF and image import, PDF export of the whole lesson, Desmos graphing calculator that drops graphs onto the board.
+- Teacher-only private pages that are never sent to the student's device.
+- An iPad joins as a third device (pen input, no mic or speaker to avoid echo), connected by QR code.
+- Screen sharing, chat, lesson timer, connection quality indicator, device picker, optional background blur (MediaPipe, served locally).
+- A permanent link per student. Students join from a link with nothing to install.
 
-## הרצה מקומית
+## Architecture
+
+```mermaid
+flowchart LR
+  T[Teacher browser] <-- WebRTC media + data channel --> S[Student browser]
+  I[iPad browser] <-- WebRTC data channel --> T
+  I <-- WebRTC data channel --> S
+  T & S & I -- WebSocket signaling --> W[Cloudflare Worker]
+  W --> DO[(Durable Object per room)]
+  W -- short-lived TURN credentials --> TURN[Cloudflare TURN]
+```
+
+- `worker/index.ts`: Cloudflare Worker with one Durable Object per room. It only relays call setup messages (signaling) and issues short-lived TURN credentials. Video never passes through the server.
+- `src/rtc/`: the WebRTC mesh. Every device connects directly to every other device using the "perfect negotiation" pattern, with ICE restart, a stuck-connection watchdog and epoch numbers for clean rebuilds.
+- `src/board/`: the whiteboard. Based on perfect-freehand and pdf.js, synced between devices over an RTCDataChannel and persisted in the browser (IndexedDB).
+- `src/ui/`: home screen, lesson screen, toolbar, Desmos dialog.
+
+## Stack
+
+TypeScript, Vite, Cloudflare Workers + Durable Objects, WebRTC, IndexedDB, perfect-freehand, pdf.js, MediaPipe selfie segmentation, Playwright for end-to-end tests.
+
+## Run locally
+
 ```
 npm install
 npm run dev        # http://localhost:8787
-npm run test:e2e   # בדיקה אוטומטית: מורה, תלמיד ואייפד בדפדפנים אמיתיים
 ```
 
-## העלאה לאוויר ממחשב Windows (הכי פשוט)
-פותחים PowerShell ומריצים:
-```
-powershell -ExecutionPolicy Bypass -File scripts\deploy-windows.ps1
-```
-הסקריפט מתקין Node ו-Git אם חסרים, מוריד את הקוד, מתחבר ל-Cloudflare בדפדפן ומעלה את האתר. אפשר להריץ אותו שוב בכל פעם שרוצים לעדכן.
+Optional TURN server (needed when a network blocks direct connections): copy `.env.example` to `.dev.vars` for local use, or set the values as Worker secrets:
 
-## העלאה לאוויר ידנית (חינם)
-1. חשבון ב-Cloudflare.
-2. `npx wrangler login`, ואז `npm run deploy`.
-3. שרת TURN, שדרוש כשהרשת חוסמת חיבור ישיר:
-   - בלוח הבקרה של Cloudflare: Realtime ← TURN ← Create.
-   - שמירת המפתחות:
-     ```
-     npx wrangler secret put TURN_KEY_ID
-     npx wrangler secret put TURN_KEY_API_TOKEN
-     ```
-   - חינם עד 1,000GB בחודש.
+```
+npx wrangler secret put TURN_KEY_ID
+npx wrangler secret put TURN_KEY_API_TOKEN
+```
+
+Without them the app falls back to public STUN only.
+
+## Deploy (Cloudflare free tier)
+
+```
+npx wrangler login
+npm run deploy
+```
+
+On Windows, `scripts/deploy-windows.ps1` installs Node and Git if missing, logs in to Cloudflare and deploys in one step.
+
+## Tests
+
+End-to-end tests drive real Chromium instances with fake camera and microphone (teacher, student and iPad in parallel) against a running dev server:
+
+```
+npm run test:e2e                 # 27 checks: P2P call, board sync, lock, screen share, reconnect, third device
+node tests/features.mjs          # 24 checks on whiteboard tools
+node tests/user-session.mjs      # "real user" walkthrough with stylus pressure, palm touches and pinch zoom
+```
+
+## Notes
+
+- The Desmos key in `src/ui/desmos.ts` is Desmos' public demo key. For regular use, request a free key at desmos.com/api.
+
+## How it was built
+
+Built by directing AI coding agents (Claude Code); I own the spec, architecture, testing and deployment.
