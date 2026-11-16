@@ -344,6 +344,31 @@ try {
   await T.locator(".lesson-row >> nth=0").locator("text=הורד PDF").click();
   await sleep(500);
   check("downloading a lesson PDF", (await T.evaluate(() => window.__lastDownload || "")).includes("דנה"));
+  await T.keyboard.press("Escape");
+  // WhatsApp: save the student's number, then the button opens their chat with the lesson link
+  await T.context().route("https://wa.me/**", (r) => r.fulfill({ status: 200, contentType: "text/html", body: "<p>WhatsApp</p>" })); // no internet in tests
+  await T.click("text=הוסף מספר וואטסאפ");
+  await T.fill(".phone-dlg input", "abc");
+  await T.click(".phone-dlg button[type=submit]");
+  check("WhatsApp: a wrong number is refused", (await T.locator(".phone-dlg .err").textContent()).length > 0);
+  await T.fill(".phone-dlg input", "050-123 4567");
+  await T.click(".phone-dlg button[type=submit]");
+  check("WhatsApp: number saved on the student's card", await until(() => T.locator(".phone-chip").textContent().then((t) => t.includes("050-123 4567"))));
+  const [wa] = await Promise.all([T.context().waitForEvent("page"), T.click(".student .btn.wa")]);
+  const waUrl = wa.url();
+  await wa.close();
+  const waText = decodeURIComponent(waUrl.split("text=")[1] || "");
+  check("WhatsApp: opens the student's chat (972 number)", waUrl.startsWith("https://wa.me/972501234567?text="), waUrl.slice(0, 40));
+  check("WhatsApp: message has the student's name and lesson link", waText.includes("דנה") && waText.includes(`/r/${ROOM}`));
+  if (cloud) {
+    await T.click("text=שיעורים קודמים");
+    await until(async () => (await T.locator(".lesson-row").count()) === 3, 15000);
+    const [wa2] = await Promise.all([T.context().waitForEvent("page"), T.locator(".lesson-row >> nth=0").locator(".btn.wa").click()]);
+    const t2 = decodeURIComponent(wa2.url().split("text=")[1] || "");
+    await wa2.close();
+    check("WhatsApp: lesson PDF link sent straight to the student's chat", wa2.url().startsWith("https://wa.me/972501234567") && t2.includes(`/api/lessons/${ROOM}/`));
+    await T.keyboard.press("Escape");
+  }
   if (cloud) {
     const list = await T.evaluate(async (room) => (await (await fetch(`/api/lessons/${room}`)).json()).items, ROOM);
     check("cloud: all 3 lesson PDFs uploaded", list.length === 3, `${list.length}`);

@@ -12,6 +12,8 @@ import { openLessonsDialog } from "./lessons-dialog";
 import { hasContent } from "../board/model";
 import { downloadBlob } from "../board/export";
 import { h, icon, iconBtn, toast, clear, fmtDuration } from "./dom";
+import { askPhone } from "./phone-dialog";
+import { inviteText, openWhatsApp, studentByRoom } from "./students";
 
 const ROLE_TITLE: Record<Role, string> = { teacher: "מורה", student: "תלמיד", ipad: "אייפד" };
 
@@ -23,6 +25,7 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
   let name = localStorage.getItem("shiur.name." + role) || (role === "teacher" ? "המורה" : role === "ipad" ? "אייפד" : "");
 
   document.title = role === "student" ? "שיעור" : `שיעור (${ROLE_TITLE[role]})`;
+  document.documentElement.classList.remove("on-home");
   clear(root);
 
   // ---------- pre-join ----------
@@ -368,7 +371,20 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       h("strong", null, role === "student" ? "שיעור" : `שיעור · ${ROLE_TITLE[role]}`),
       timerEl, netEl,
     );
-    const statusBanner = h("div", { class: "status-banner", hidden: true });
+    const statusText = h("span");
+    // Teacher waiting for the student: open the student's WhatsApp chat with the lesson link.
+    const waInvite = h("button", {
+      class: "btn wa small-btn", type: "button", hidden: true,
+      onclick: async () => {
+        const st = studentByRoom(roomId);
+        const who = st?.name || roomName.replace(/^שיעור-?/, "") || "";
+        let phone = st?.phone;
+        if (!phone && st) phone = (await askPhone(roomId, st.name)) ?? undefined;
+        if (!phone) return toast("כדי לשלוח בוואטסאפ, הוסף את התלמיד במסך הראשי עם מספר טלפון");
+        openWhatsApp(phone, inviteText(who, roomId));
+      },
+    }, icon("wa", 16), " שלח לו את הלינק בוואטסאפ");
+    const statusBanner = h("div", { class: "status-banner", hidden: true }, statusText, waInvite);
     const unlockAudio = h("button", { class: "btn audio-unlock", hidden: true, onclick: () => playAll() }, icon("speaker", 18), " לחץ כאן כדי לשמוע");
 
     clear(root);
@@ -474,9 +490,11 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       let text = "";
       if (room.signalingState !== "open" && connected.length === 0) text = "מתחבר לשרת…";
       else if (peers.some((p) => p.link.state !== "connected" && p.link.state !== "new")) text = "החיבור נחלש, מתחבר מחדש…";
-      else if (peers.length === 0) text = role === "student" ? "מחכים למורה…" : "מחכים שהתלמיד יצטרף…";
-      statusBanner.textContent = text;
+      else if (role === "teacher" && !peers.some((p) => p.info.role === "student")) text = "מחכים שהתלמיד יצטרף…";
+      else if (peers.length === 0) text = role === "student" ? "מחכים למורה…" : "מחכים שהמחשב של המורה יתחבר…";
+      statusText.textContent = text;
       statusBanner.hidden = !text;
+      waInvite.hidden = !(role === "teacher" && peers.filter((p) => p.info.role === "student").length === 0 && room.signalingState === "open" && !!studentByRoom(roomId));
       netEl.textContent = others.length ? `${others.length + 1} בשיעור` : "";
     };
 

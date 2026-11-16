@@ -3,22 +3,10 @@
 import QRCode from "qrcode";
 import { h, icon, toast, clear } from "./dom";
 import { openLessonsDialog } from "./lessons-dialog";
+import { askPhone } from "./phone-dialog";
+import { inviteText, loadStudents, openWhatsApp, roomUrl, saveStudents, type Student } from "./students";
 
-interface Student {
-  id: string;
-  name: string;
-  room: string;
-  created: number;
-}
-
-const KEY = "shiur.students";
-
-function load(): Student[] {
-  try { return JSON.parse(localStorage.getItem(KEY) || "[]"); } catch { return []; }
-}
-function save(list: Student[]) {
-  localStorage.setItem(KEY, JSON.stringify(list));
-}
+export { roomUrl } from "./students";
 
 export function newRoomId(): string {
   const a = new Uint8Array(9);
@@ -26,9 +14,6 @@ export function newRoomId(): string {
   const abc = "abcdefghijkmnpqrstuvwxyz23456789";
   return Array.from(a, (b) => abc[b % abc.length]).join("");
 }
-
-export const roomUrl = (room: string, role?: string) =>
-  `${location.origin}/r/${room}${role ? `?role=${role}` : ""}`;
 
 async function copy(text: string) {
   try {
@@ -58,49 +43,97 @@ function qrDialog(room: string, title: string) {
   dlg.showModal();
 }
 
+/** Hand-drawn physics doodles in the notebook's margin (decoration only). */
+function doodles(): HTMLElement {
+  const wrap = h("div", { class: "doodles", "aria-hidden": "true" });
+  wrap.innerHTML = `
+  <svg direction="ltr" class="d1" viewBox="0 0 160 90" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M6 70 L150 70"/><path d="M144 65 L151 70 L144 75"/>
+    <path d="M10 70 C 25 18, 40 18, 55 70 S 85 122, 100 70 S 130 18, 145 70" opacity=".9"/>
+  </svg>
+  <svg direction="ltr" class="d2" viewBox="0 0 120 130" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+    <path d="M20 10 L100 10"/><path d="M60 10 L88 92"/><circle cx="92" cy="104" r="11"/>
+    <path d="M60 10 L60 70" stroke-dasharray="4 6" opacity=".6"/><path d="M60 40 A 30 30 0 0 0 70 38" />
+    <text x="70" y="52" font-size="16" fill="currentColor" stroke="none" font-family="inherit">θ</text>
+  </svg>
+  <svg direction="ltr" class="d3" viewBox="0 0 150 60" fill="currentColor">
+    <text x="4" y="40" font-size="34" font-family="inherit">F = ma</text>
+    <path d="M6 50 C 40 56, 90 44, 140 50" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity=".5"/>
+  </svg>
+  <svg direction="ltr" class="d4" viewBox="0 0 120 120" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14 106 L106 106"/><path d="M14 106 L100 40"/><rect x="48" y="58" width="26" height="18" transform="rotate(-37 61 67)"/>
+    <path d="M58 70 L50 92"/><path d="M47 86 L50 93 L55 87"/>
+  </svg>`;
+  return wrap;
+}
+
 export function renderHome(root: HTMLElement) {
-  document.title = "שיעור פרטי";
-  let list = load();
+  document.title = "השיעורים שלי";
+  document.documentElement.classList.add("on-home");
+  let list = loadStudents();
   const listEl = h("div", { class: "students" });
+  const persist = () => saveStudents(list);
 
   const draw = () => {
     clear(listEl);
     if (!list.length) {
-      listEl.append(h("p", { class: "muted" }, "עוד אין תלמידים. הוסף תלמיד כדי לקבל לינק קבוע לשיעורים שלו."));
+      listEl.append(h("div", { class: "empty" },
+        h("p", { class: "hand" }, "עוד אין כאן תלמידים."),
+        h("p", { class: "muted" }, "מוסיפים תלמיד, ומקבלים לינק קבוע לשיעורים שלו. שולחים לו אותו פעם אחת בוואטסאפ, וזהו."),
+      ));
     }
-    for (const s of list) {
-      listEl.append(
-        h("div", { class: "student card" },
-          h("div", { class: "student-name" }, s.name),
-          h("div", { class: "student-actions" },
-            h("a", { class: "btn", href: `${roomUrl(s.room, "teacher")}&n=${encodeURIComponent(s.name)}` }, icon("cam", 18), " התחל שיעור"),
-            h("button", { class: "btn ghost", onclick: () => copy(roomUrl(s.room)) }, icon("copy", 18), " לינק לתלמיד"),
-            h("button", { class: "btn ghost", onclick: () => qrDialog(s.room, s.name) }, icon("ipad", 18), " חבר אייפד"),
-            h("button", { class: "btn ghost", onclick: () => openLessonsDialog(s.room, s.name) }, icon("history", 18), " שיעורים קודמים"),
-            h("button", {
-              class: "btn ghost danger",
-              title: "מחק",
-              onclick: () => {
-                if (!confirm(`למחוק את ${s.name}? הלינק שלו יפסיק להופיע כאן.`)) return;
-                list = list.filter((x) => x.id !== s.id);
-                save(list);
-                draw();
-              },
-            }, icon("trash", 18)),
-          ),
-        ),
-      );
-    }
+    list.forEach((s, i) => listEl.append(card(s, i)));
+  };
+
+  const card = (s: Student, i: number) => {
+    const phoneBtn = h("button", {
+      class: "phone-chip", type: "button", title: "מספר הוואטסאפ של התלמיד",
+      onclick: async () => { await askPhone(s.room, s.name); list = loadStudents(); draw(); },
+    }, icon("phone", 14), s.phone ? ` ${s.phone}` : " הוסף מספר וואטסאפ");
+    return h("article", { class: `student card tab-${i % 5}` },
+      h("div", { class: "student-head" },
+        h("div", { class: "student-name" }, s.name),
+        phoneBtn,
+        h("button", {
+          class: "ibtn del-student",
+          type: "button",
+          title: "מחק",
+          "aria-label": `מחק את ${s.name}`,
+          onclick: () => {
+            if (!confirm(`למחוק את ${s.name}? הלינק שלו יפסיק להופיע כאן.`)) return;
+            list = list.filter((x) => x.id !== s.id);
+            persist();
+            draw();
+          },
+        }, icon("trash", 18)),
+      ),
+      h("div", { class: "student-actions" },
+        h("a", { class: "btn", href: `${roomUrl(s.room, "teacher")}&n=${encodeURIComponent(s.name)}` }, icon("cam", 18), " התחל שיעור"),
+        h("button", {
+          class: "btn wa", type: "button", title: "פותח את הצ'אט עם התלמיד בוואטסאפ, עם הלינק לשיעור",
+          onclick: async () => {
+            let phone = s.phone;
+            if (!phone) { phone = (await askPhone(s.room, s.name)) ?? undefined; list = loadStudents(); draw(); }
+            if (phone) openWhatsApp(phone, inviteText(s.name, s.room));
+          },
+        }, icon("wa", 18), " לינק בוואטסאפ"),
+        h("button", { class: "btn ghost", type: "button", onclick: () => copy(roomUrl(s.room)) }, icon("copy", 18), " לינק לתלמיד"),
+        h("button", { class: "btn ghost", type: "button", onclick: () => qrDialog(s.room, s.name) }, icon("ipad", 18), " חבר אייפד"),
+        h("button", { class: "btn ghost", type: "button", onclick: () => openLessonsDialog(s.room, s.name) }, icon("history", 18), " שיעורים קודמים"),
+      ),
+    );
   };
 
   const nameInput = h("input", { type: "text", placeholder: "שם התלמיד", maxlength: 40, class: "input" });
+  const phoneInput = h("input", { type: "tel", inputmode: "tel", dir: "ltr", placeholder: "וואטסאפ (לא חובה)", maxlength: 20, class: "input phone-in" });
   const add = (e: Event) => {
     e.preventDefault();
     const name = nameInput.value.trim();
     if (!name) return nameInput.focus();
-    list.unshift({ id: newRoomId(), name, room: newRoomId(), created: Date.now() });
-    save(list);
+    list.unshift({ id: newRoomId(), name, room: newRoomId(), created: Date.now(), phone: phoneInput.value.trim() || undefined });
+    persist();
     nameInput.value = "";
+    phoneInput.value = "";
     draw();
   };
 
@@ -108,26 +141,34 @@ export function renderHome(root: HTMLElement) {
   root.append(
     h("main", { class: "home" },
       h("header", { class: "home-head" },
-        h("h1", null, "השיעורים שלי"),
-        h("p", { class: "muted" }, "שיחת וידאו ישירה עם התלמיד, לוח משותף לעט של האייפד, ושיתוף מסך."),
+        doodles(),
+        h("p", { class: "eyebrow" }, new Date().toLocaleDateString("he-IL", { weekday: "long", day: "numeric", month: "long" })),
+        h("h1", null, h("span", { class: "hl" }, "השיעורים שלי")),
+        h("p", { class: "lead" }, "וידאו עם התלמיד, לוח משותף שכותבים עליו עם העט של האייפד, ודף עבודה פתוח בצד."),
       ),
       h("form", { class: "add card", onsubmit: add },
-        nameInput,
-        h("button", { class: "btn", type: "submit" }, icon("plus", 18), " הוסף תלמיד"),
+        h("label", { class: "add-label hand", for: "new-student" }, "תלמיד חדש"),
+        h("div", { class: "add-row" },
+          Object.assign(nameInput, { id: "new-student" }),
+          phoneInput,
+          h("button", { class: "btn", type: "submit" }, icon("plus", 18), " הוסף תלמיד"),
+        ),
       ),
       listEl,
-      h("section", { class: "card quick" },
-        h("h2", null, "שיעור מהיר"),
-        h("p", { class: "muted" }, "חדר חד-פעמי בלי לשמור תלמיד."),
-        h("button", { class: "btn ghost", onclick: () => { location.href = roomUrl(newRoomId(), "teacher"); } }, "פתח חדר חדש"),
-      ),
-      h("section", { class: "card tips" },
-        h("h2", null, "לפני השיעור"),
-        h("ul", null,
-          h("li", null, "המחשב מחובר בכבל רשת אם אפשר, והאייפד על רשת 5GHz."),
-          h("li", null, "האייפד מחובר לחשמל, ונעילה אוטומטית כבויה (הגדרות ← תצוגה ובהירות)."),
-          h("li", null, "פתח במחשב את \"התחל שיעור\", ובאייפד את \"חבר אייפד\". האייפד נכנס בלי מיקרופון ורמקול כדי שלא יהיה הד."),
-          h("li", null, "שלח לתלמיד את הלינק הקבוע שלו. הוא לא צריך להתקין כלום."),
+      h("div", { class: "notes" },
+        h("section", { class: "note quick" },
+          h("h2", { class: "hand" }, "שיעור מהיר"),
+          h("p", null, "חדר חד-פעמי, בלי לשמור תלמיד."),
+          h("button", { class: "btn ghost", type: "button", onclick: () => { location.href = roomUrl(newRoomId(), "teacher"); } }, icon("plus", 18), " פתח חדר חדש"),
+        ),
+        h("section", { class: "note tips" },
+          h("h2", { class: "hand" }, "לפני השיעור"),
+          h("ul", null,
+            h("li", null, "המחשב בכבל רשת אם אפשר, והאייפד על רשת 5GHz."),
+            h("li", null, "האייפד מחובר לחשמל, ונעילה אוטומטית כבויה."),
+            h("li", null, "במחשב: \"התחל שיעור\". באייפד: \"חבר אייפד\" (בלי מיקרופון ורמקול, כדי שלא יהיה הד)."),
+            h("li", null, "התלמיד נכנס מהלינק הקבוע שלו. לא צריך להתקין כלום."),
+          ),
         ),
       ),
     ),

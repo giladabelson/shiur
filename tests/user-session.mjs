@@ -71,7 +71,7 @@ try {
   // 1. Teacher opens the home page on a Windows laptop and adds a student
   const T = await device("teacher", { viewport: { width: 1366, height: 768 } });
   await T.page.goto(BASE);
-  await T.page.fill(".add input", "יואב");
+  await T.page.fill("#new-student", "יואב");
   await T.page.click(".add .btn");
   await T.shot("01");
   await T.page.click("text=חבר אייפד");

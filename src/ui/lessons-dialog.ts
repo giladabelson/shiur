@@ -3,6 +3,8 @@
 import { downloadBlob } from "../board/export";
 import { h, icon, toast } from "./dom";
 import { KEEP_DAYS, listLessons, type LessonEntry } from "./lessons";
+import { askPhone } from "./phone-dialog";
+import { openWhatsApp, pdfText, studentByRoom } from "./students";
 
 export function openLessonsDialog(room: string, studentName: string) {
   const body = h("div", { class: "lessons" }, h("p", { class: "muted" }, "טוען…"));
@@ -50,23 +52,37 @@ export function openLessonsDialog(room: string, studentName: string) {
           },
         }, icon("download", 18), " הורד PDF"),
         h("button", {
-          class: "btn ghost", type: "button",
+          class: "btn wa", type: "button",
           onclick: async () => {
-            const b = await getBlob();
-            const file = b ? new File([b], it.name || "lesson.pdf", { type: "application/pdf" }) : null;
-            // Phone / iPad / Mac: the system share sheet (WhatsApp, mail…). Otherwise copy the link.
-            if (file && (navigator as any).canShare?.({ files: [file] })) {
-              try { await navigator.share({ files: [file], title: it.name }); return; } catch { /* cancelled */ return; }
-            }
+            let phone = studentByRoom(room)?.phone;
+            if (!phone) phone = (await askPhone(room, studentName)) ?? undefined;
+            if (!phone) return;
             if (abs) {
-              try { await navigator.clipboard.writeText(abs); toast("הקישור ל-PDF הועתק. אפשר להדביק לתלמיד בוואטסאפ"); }
-              catch { prompt("העתק את הקישור:", abs); }
-            } else {
-              if (b) downloadBlob(b, it.name || "lesson.pdf");
-              toast("הקובץ ירד למחשב. אפשר לצרף אותו בוואטסאפ או במייל");
+              // Cloud copy: the student gets a link straight in the chat.
+              openWhatsApp(phone, pdfText(studentName, abs));
+              return;
             }
+            const b = await getBlob();
+            if (!b) return toast("הקובץ לא נמצא");
+            const file = new File([b], it.name || "lesson.pdf", { type: "application/pdf" });
+            // Phone / iPad: the share sheet sends the file itself (choose WhatsApp there).
+            if ((navigator as any).canShare?.({ files: [file] })) {
+              try { await navigator.share({ files: [file], title: it.name }); } catch { /* cancelled */ }
+              return;
+            }
+            // Computer: download the file and open the chat; drag the file into it.
+            downloadBlob(b, it.name || "lesson.pdf");
+            openWhatsApp(phone, pdfText(studentName));
+            toast("הקובץ ירד למחשב. גרור אותו לצ'אט שנפתח בוואטסאפ", 6000);
           },
-        }, icon("share", 18), " שלח לתלמיד"),
+        }, icon("wa", 18), " שלח בוואטסאפ"),
+        abs ? h("button", {
+          class: "btn ghost", type: "button", title: "העתק קישור ל-PDF",
+          onclick: async () => {
+            try { await navigator.clipboard.writeText(abs); toast("הקישור ל-PDF הועתק"); }
+            catch { prompt("העתק את הקישור:", abs); }
+          },
+        }, icon("copy", 18)) : null,
       ),
     );
   }
