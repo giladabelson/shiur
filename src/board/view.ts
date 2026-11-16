@@ -124,7 +124,7 @@ export function drawStroke(ctx: CanvasRenderingContext2D, s: Drawable, cache?: M
 
 /** Paper templates, drawn under the ink (only on pages without a PDF/image background). */
 export function drawTemplate(ctx: CanvasRenderingContext2D, p: Page, scale: number) {
-  const tpl: Template = p.tpl ?? "blank";
+  const tpl: Template = p.tpl ?? "grid"; // squared paper unless the teacher picks another
   if (tpl === "blank" || p.bg) return;
   const hair = 1 / scale;
   ctx.save();

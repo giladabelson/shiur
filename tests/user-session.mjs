@@ -72,6 +72,9 @@ try {
   const T = await device("teacher", { viewport: { width: 1366, height: 768 } });
   await T.page.goto(BASE);
   await T.page.fill("#new-student", "יואב");
+  await T.page.fill(".add .phone-in", "050-1234567");
+  await T.page.route("https://wa.me/**", (r) => r.fulfill({ body: "wa" }));
+  await T.page.context().route("https://wa.me/**", (r) => r.fulfill({ body: "wa" }));
   await T.page.click(".add .btn");
   await T.shot("01");
   await T.page.click("text=חבר אייפד");

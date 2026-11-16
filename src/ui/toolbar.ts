@@ -238,7 +238,7 @@ export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
     board.canPaste ? choice("הדבק כאן", false, () => { closePop(); view.pasteHere(); }, "paste") : null,
     label("רקע לעמוד"),
     h("div", { class: "pop-grid tpl" }, ...TEMPLATES.map((t) =>
-      choice(t.label, (board.currentPage.tpl ?? "blank") === t.id, () => { closePop(); if (board.currentPage.bg) toast("לעמוד עם PDF או תמונה אין רקע"); else board.setTemplate(t.id); }))),
+      choice(t.label, (board.currentPage.tpl ?? "grid") === t.id, () => { closePop(); if (board.currentPage.bg) toast("לעמוד עם PDF או תמונה אין רקע"); else board.setTemplate(t.id); }))),
     h("hr"),
     choice("נקה את העמוד", false, () => { closePop(); if (confirm("לנקות את כל הכתוב בעמוד הזה?")) board.clearPage(); }, "trash"),
     choice("מחק את העמוד", false, () => { closePop(); if (confirm("למחוק את העמוד הזה?")) board.deletePage(); }, "pageDel"),

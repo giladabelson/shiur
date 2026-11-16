@@ -4,7 +4,7 @@ import QRCode from "qrcode";
 import { h, icon, toast, clear } from "./dom";
 import { openLessonsDialog } from "./lessons-dialog";
 import { askPhone } from "./phone-dialog";
-import { inviteText, loadStudents, openWhatsApp, roomUrl, saveStudents, type Student } from "./students";
+import { inviteText, loadStudents, openWhatsApp, roomUrl, saveStudents, waNumber, type Student } from "./students";
 
 export { roomUrl } from "./students";
 
@@ -125,16 +125,26 @@ export function renderHome(root: HTMLElement) {
   };
 
   const nameInput = h("input", { type: "text", placeholder: "שם התלמיד", maxlength: 40, class: "input" });
-  const phoneInput = h("input", { type: "tel", inputmode: "tel", dir: "ltr", placeholder: "וואטסאפ (לא חובה)", maxlength: 20, class: "input phone-in" });
+  const phoneInput = h("input", { type: "tel", inputmode: "tel", dir: "ltr", placeholder: "טלפון (וואטסאפ)", maxlength: 20, required: true, class: "input phone-in" });
+  const addErr = h("div", { class: "err add-err", role: "alert" });
   const add = (e: Event) => {
     e.preventDefault();
     const name = nameInput.value.trim();
     if (!name) return nameInput.focus();
-    list.unshift({ id: newRoomId(), name, room: newRoomId(), created: Date.now(), phone: phoneInput.value.trim() || undefined });
+    const phone = phoneInput.value.trim();
+    if (!waNumber(phone)) {
+      addErr.textContent = phone ? "המספר לא נראה תקין. למשל 050-1234567" : "צריך את הטלפון של התלמיד, כדי לשלוח לו את הלינק בוואטסאפ";
+      return phoneInput.focus();
+    }
+    addErr.textContent = "";
+    const room = newRoomId();
+    list.unshift({ id: newRoomId(), name, room, created: Date.now(), phone });
     persist();
     nameInput.value = "";
     phoneInput.value = "";
     draw();
+    // straight to the student's WhatsApp chat with the lesson link ready to send
+    openWhatsApp(phone, inviteText(name, room));
   };
 
   clear(root);
@@ -146,13 +156,14 @@ export function renderHome(root: HTMLElement) {
         h("h1", null, h("span", { class: "hl" }, "השיעורים שלי")),
         h("p", { class: "lead" }, "וידאו עם התלמיד, לוח משותף שכותבים עליו עם העט של האייפד, ודף עבודה פתוח בצד."),
       ),
-      h("form", { class: "add card", onsubmit: add },
+      h("form", { class: "add card", onsubmit: add, novalidate: true },
         h("label", { class: "add-label hand", for: "new-student" }, "תלמיד חדש"),
         h("div", { class: "add-row" },
           Object.assign(nameInput, { id: "new-student" }),
           phoneInput,
-          h("button", { class: "btn", type: "submit" }, icon("plus", 18), " הוסף תלמיד"),
+          h("button", { class: "btn", type: "submit" }, icon("plus", 18), " הוסף ושלח בוואטסאפ"),
         ),
+        addErr,
       ),
       listEl,
       h("div", { class: "notes" },

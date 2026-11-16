@@ -87,6 +87,23 @@ try {
   check("everyone connected", await until(async () => (await connected(T)) === 2 && (await connected(S)) === 2 && (await connected(I)) === 2, 25000));
   await sleep(800);
 
+  // ---------------- 0. squared paper by default ----------------
+  check("new board: squared paper by default", await S.evaluate(() => (window.__board.currentPage.tpl ?? "grid") === "grid"));
+  {
+    const px = await S.evaluate(() => {
+      const c = [...document.querySelectorAll(".board-wrap canvas")].find((x) => x.width > 200);
+      const ctx = c.getContext("2d"); const d = ctx.getImageData(0, 0, c.width, c.height).data;
+      let lines = 0, white = 0;
+      for (let i = 0; i < d.length; i += 4 * 7) { if (d[i + 3] === 0) continue; const v = d[i] + d[i + 1] + d[i + 2]; if (v > 750) white++; else if (d[i + 2] > d[i] + 8) lines++; }
+      return { lines, white };
+    });
+    check("new board: grid lines are drawn", px.lines > 50, JSON.stringify(px));
+  }
+  await T.click('.toolbar button[aria-label="עמודים ורקע"]');
+  check("template menu marks squares as the current paper", await T.locator(".pop-item.on", { hasText: "משבצות" }).count() === 1);
+  await T.click('.toolbar button[aria-label="עמודים ורקע"]'); // close the menu again
+  await sleep(200);
+
   // ---------------- 1. scrolling never makes the board disappear ----------------
   for (const [name, page] of [["teacher", T], ["student", S]]) {
     const b = await box(page);
@@ -360,6 +377,22 @@ try {
   const waText = decodeURIComponent(waUrl.split("text=")[1] || "");
   check("WhatsApp: opens the student's chat (972 number)", waUrl.startsWith("https://wa.me/972501234567?text="), waUrl.slice(0, 40));
   check("WhatsApp: message has the student's name and lesson link", waText.includes("דנה") && waText.includes(`/r/${ROOM}`));
+  // new student: the phone is required, and adding opens their WhatsApp with the lesson link
+  await T.fill("#new-student", "רון");
+  await T.click(".add button[type=submit]");
+  check("new student: refused without a phone", (await T.locator(".add-err").textContent()).length > 0 && (await T.locator(".student").count()) === 1);
+  await T.fill(".add .phone-in", "12");
+  await T.click(".add button[type=submit]");
+  check("new student: refused with a wrong phone", (await T.locator(".student").count()) === 1);
+  await T.fill(".add .phone-in", "054-7654321");
+  const [wa3] = await Promise.all([T.context().waitForEvent("page"), T.click(".add button[type=submit]")]);
+  const t3 = decodeURIComponent(wa3.url().split("text=")[1] || "");
+  await wa3.close();
+  check("new student: added with the phone on the card", (await T.locator(".student").count()) === 2 && (await T.locator(".phone-chip", { hasText: "054-7654321" }).count()) === 1);
+  check("new student: WhatsApp opens their chat with the lesson link", wa3.url().startsWith("https://wa.me/972547654321?text=") && t3.includes("רון") && /\/r\/[\w-]+/.test(t3), wa3.url().slice(0, 40));
+  await T.evaluate((room) => localStorage.setItem("shiur.students", JSON.stringify([{ id: "s1", name: "דנה", room, created: Date.now(), phone: "050-123 4567" }])), ROOM);
+  await T.reload();
+
   if (cloud) {
     await T.click("text=שיעורים קודמים");
     await until(async () => (await T.locator(".lesson-row").count()) === 3, 15000);

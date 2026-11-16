@@ -360,3 +360,5 @@ a { color: var(--accent); }
   .sidefile { width: auto !important; max-width: none; height: 40%; border: 0; border-top: 1px solid var(--line); }
   .sidefile-resizer { display: none; }
 }
+.add-err:empty { display: none; }
+.add-err { margin-top: 10px; }
