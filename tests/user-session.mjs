@@ -6,7 +6,7 @@ import fs from "node:fs";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8787";
 const OUT = process.argv[3] || "./shots";
-const PDF = process.argv[4];
+const PDF = process.argv[4] || new URL("./fixtures/worksheet.pdf", import.meta.url).pathname;
 fs.mkdirSync(OUT, { recursive: true });
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 const problems = [];
@@ -71,7 +71,10 @@ try {
   // 1. Teacher opens the home page on a Windows laptop and adds a student
   const T = await device("teacher", { viewport: { width: 1366, height: 768 } });
   await T.page.goto(BASE);
-  await T.page.fill(".add input", "יואב");
+  await T.page.fill("#new-student", "יואב");
+  await T.page.fill(".add .phone-in", "050-1234567");
+  await T.page.route("https://wa.me/**", (r) => r.fulfill({ body: "wa" }));
+  await T.page.context().route("https://wa.me/**", (r) => r.fulfill({ body: "wa" }));
   await T.page.click(".add .btn");
   await T.shot("01");
   await T.page.click("text=חבר אייפד");
@@ -198,7 +201,8 @@ try {
     const pdfText = fs.readFileSync(pdfPath, "latin1");
     const pageCount = (pdfText.match(/\/Type\s*\/Page[^s]/g) || []).length;
     check(`PDF export: file "${dl.suggestedFilename()}" with ${pageCount} pages`, pdfText.startsWith("%PDF") && pageCount === 3);
-    check("PDF file name has the student's name", dl.suggestedFilename().includes("יואב"));
+    // Headless Chromium reports non-English download names as "download", so read the name the app chose.
+    check("PDF file name has the student's name", (await T.page.evaluate(() => window.__lastDownload || "")).includes("יואב"));
     await S.page.click('button[aria-label="עמוד הבא"]');
     await sleep(800);
     check("page navigation syncs to iPad", await until(() => I.page.evaluate(() => window.__board.pages.findIndex((p) => p.id === window.__board.currentPage.id) === 2)));

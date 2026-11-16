@@ -9,7 +9,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 const docs = new Map<string, Promise<pdfjs.PDFDocumentProxy | null>>();
 const images = new Map<string, Promise<ImageBitmap | null>>();
 
-function getDoc(assetId: string) {
+export function getDoc(assetId: string) {
   let p = docs.get(assetId);
   if (!p) {
     p = (async () => {

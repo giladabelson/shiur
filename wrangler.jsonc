@@ -14,4 +14,9 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }]
   // Secrets (set with `npx wrangler secret put`): TURN_KEY_ID, TURN_KEY_API_TOKEN
+  //
+  // Lesson PDFs in the cloud (optional, see README "Lesson PDFs"). After creating the bucket with
+  //   npx wrangler r2 bucket create shiur-lessons
+  // remove the // in front of the next line (and add a comma after the "migrations" line above):
+  // "r2_buckets": [{ "binding": "LESSONS", "bucket_name": "shiur-lessons" }]
 }

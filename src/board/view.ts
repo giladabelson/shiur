@@ -12,6 +12,9 @@ export type ViewTool = "pen" | "hl" | "fade" | "shape" | "eraser" | "lasso" | "l
 export type ShapeKind = "line" | "arrow" | "rect" | "ellipse" | "tri";
 
 const PEN_GRACE_MS = 600;
+/** Hover laser: the mouse must move this many screen pixels before the pointer appears. */
+const LASER_START_PX = 12;
+const LASER_WINDOW_MS = 350;
 const HOLD_MS = 550;
 const HL_ALPHA = 0.35;
 const SEL_COLOR = "#2563eb";
@@ -121,7 +124,7 @@ export function drawStroke(ctx: CanvasRenderingContext2D, s: Drawable, cache?: M
 
 /** Paper templates, drawn under the ink (only on pages without a PDF/image background). */
 export function drawTemplate(ctx: CanvasRenderingContext2D, p: Page, scale: number) {
-  const tpl: Template = p.tpl ?? "blank";
+  const tpl: Template = p.tpl ?? "grid"; // squared paper unless the teacher picks another
   if (tpl === "blank" || p.bg) return;
   const hair = 1 / scale;
   ctx.save();
@@ -224,7 +227,7 @@ function bboxOf(strokes: Stroke[]) {
 }
 
 /** Renders one page (template, background, ink) onto a canvas, used for PNG/PDF export. */
-export function renderPage(board: Board, page: Page, widthPx: number): Promise<HTMLCanvasElement> {
+export function renderPage(board: Pick<Board, "strokes">, page: Page, widthPx: number): Promise<HTMLCanvasElement> {
   return new Promise((resolve) => {
     const c = document.createElement("canvas");
     const s = widthPx / page.w;
@@ -311,6 +314,8 @@ export class BoardView {
   private hover: { x: number; y: number; on: boolean } = { x: 0, y: 0, on: false };
   private spaceDown = false;
   private laserQueued: { x: number; y: number } | null = null;
+  /** Where a hovering mouse last came to rest; the pointer only shows once it really moves. */
+  private laserRest: { x: number; y: number; at: number } | null = null;
 
   constructor(private board: Board) {
     this.el = document.createElement("div");
@@ -334,7 +339,13 @@ export class BoardView {
     this.loop();
   }
 
-  invalidate(what: "all" | "live" | "page" | "lock" | "stroke", strokeId?: string) {
+  invalidate(what: "all" | "live" | "page" | "lock" | "stroke" | "side" | "lesson", strokeId?: string) {
+    if (what === "side") return; // the side file is drawn by its own panel
+    if (what === "lesson") {
+      this.clearSelection();
+      this.pageId = ""; // re-fit on the new lesson's first page
+      what = "all";
+    }
     if (what === "stroke" && strokeId) {
       // A new stroke is drawn on top of the existing base layer instead of redrawing everything.
       if (!this.baseDirty) this.pendingAdds.push(strokeId);
@@ -357,6 +368,11 @@ export class BoardView {
   private resize() {
     const r = this.el.getBoundingClientRect();
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    // If the whole page was on screen before (not zoomed in), keep it whole in the new size,
+    // e.g. when the side file opens and the board gets narrower.
+    const p = this.page;
+    const wasWhole = this.cssW > 1 && p.w * this.scale <= this.cssW + 1 && p.h * this.scale <= this.cssH + 1;
+    if (wasWhole) this.fit = true;
     this.cssW = Math.max(1, r.width);
     this.cssH = Math.max(1, r.height);
     for (const c of [this.base, this.top]) {
@@ -364,6 +380,7 @@ export class BoardView {
       c.height = Math.round(this.cssH * this.dpr);
     }
     if (this.fit) this.fitPage();
+    else this.clampView();
     this.baseDirty = this.topDirty = true;
   }
 
@@ -387,7 +404,16 @@ export class BoardView {
     this.viewChanged();
   }
 
+  /** Keeps the page on screen: scrolling, panning or zooming can never push it out of view. */
+  private clampView() {
+    if (this.cssW <= 1 || this.cssH <= 1) return; // hidden (e.g. a shared screen is on stage)
+    const p = this.page;
+    this.ox = clampAxis(this.ox, p.w * this.scale, this.cssW);
+    this.oy = clampAxis(this.oy, p.h * this.scale, this.cssH);
+  }
+
   private viewChanged() {
+    this.clampView();
     this.baseDirty = this.topDirty = true;
     this.placeSelMenu();
     this.onViewChange();
@@ -525,7 +551,10 @@ export class BoardView {
       ctx.restore();
     }
 
-    for (const ls of this.board.live.values()) if (ls.page === p.id) drawStroke(ctx, ls, undefined, undefined, false);
+    for (const ls of this.board.live.values()) {
+      // A live stroke can have a hole where a packet is still on its way; draw what arrived.
+      if (ls.page === p.id) drawStroke(ctx, { ...ls, pts: ls.pts.filter(Boolean) }, undefined, undefined, false);
+    }
     for (const t of this.board.temps.values()) {
       if (t.s.page !== p.id) continue;
       const age = now - t.at;
@@ -730,11 +759,15 @@ export class BoardView {
     el.addEventListener("wheel", (e) => {
       e.preventDefault();
       const r = this.el.getBoundingClientRect();
+      // Firefox reports lines/pages instead of pixels.
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.cssH : 1;
+      const dx = e.deltaX * unit, dy = e.deltaY * unit;
       if (e.ctrlKey || e.metaKey) {
-        this.zoomBy(Math.exp(-e.deltaY * 0.01), e.clientX - r.left, e.clientY - r.top);
+        this.zoomBy(Math.exp(-dy * 0.01), e.clientX - r.left, e.clientY - r.top);
       } else {
-        this.ox -= e.deltaX;
-        this.oy -= e.deltaY;
+        // Shift + wheel scrolls sideways (Windows mice have no horizontal wheel).
+        this.ox -= e.shiftKey && !dx ? dy : dx;
+        this.oy -= e.shiftKey && !dx ? 0 : dy;
         this.fit = false;
         this.viewChanged();
       }
@@ -911,8 +944,9 @@ export class BoardView {
     }
     const [x, y] = this.toPage(e.clientX, e.clientY);
     if (this.tool === "laser" && (e.buttons || e.pointerType === "pen" || e.pointerType === "mouse")) {
-      // The laser follows the mouse / Pencil hover even without pressing.
-      this.laserQueued = { x, y };
+      // The laser follows the mouse / Pencil hover even without pressing, but only once the user
+      // actually moves it (a resting or slightly bumped mouse shows nothing).
+      if (e.buttons || this.laserMoved(e.clientX, e.clientY)) this.laserQueued = { x, y };
       return;
     }
     if (this.selDrag && this.selDrag.pointerId === e.pointerId) {
@@ -964,6 +998,21 @@ export class BoardView {
       return [px, py, ev.pressure || 0.5] as Pt;
     });
     this.topDirty = true;
+  }
+
+  /**
+   * Hover laser: true once the mouse makes a deliberate movement (LASER_START_PX within
+   * LASER_WINDOW_MS). A resting, bumped or slowly drifting mouse shows nothing.
+   */
+  private laserMoved(cx: number, cy: number): boolean {
+    if (this.board.lasers.has(this.board.me)) return true; // already showing: keep following
+    const now = performance.now();
+    const r = this.laserRest;
+    if (!r || now - r.at > LASER_WINDOW_MS) {
+      this.laserRest = { x: cx, y: cy, at: now };
+      return false;
+    }
+    return Math.hypot(cx - r.x, cy - r.y) >= LASER_START_PX;
   }
 
   /** Shape tools: build the shape from the drag start to the current point. */
@@ -1143,9 +1192,9 @@ export class BoardView {
       if (d.kind === "shape" || d.snapped) {
         if (d.pts.length >= 2) this.board.sendLive(meta, d.pts, true);
       } else if (d.pts.length > d.sentUpTo) {
-        // Overlap one point so lost packets leave small gaps rather than jumps.
-        const from = Math.max(0, d.sentUpTo - 1);
-        this.board.sendLive(meta, d.pts.slice(from).map((p) => [Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10, Math.round(p[2] * 100) / 100] as Pt));
+        // Each batch says where its points go, so batches that arrive out of order still draw correctly.
+        const from = d.sentUpTo;
+        this.board.sendLive(meta, d.pts.slice(from).map((p) => [Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10, Math.round(p[2] * 100) / 100] as Pt), false, from);
         d.sentUpTo = d.pts.length;
       }
     }
@@ -1159,6 +1208,16 @@ export class BoardView {
       this.laserQueued = null;
     }
   }
+}
+
+/**
+ * Allowed offset on one axis. A page smaller than the screen stays fully visible; a larger
+ * (zoomed-in) page can be scrolled until its edge, plus a small margin, but never off screen.
+ */
+export function clampAxis(offset: number, size: number, view: number, margin = 40): number {
+  if (!Number.isFinite(offset)) return 0;
+  if (size <= view) return Math.min(Math.max(offset, 0), view - size);
+  return Math.min(Math.max(offset, view - size - margin), margin);
 }
 
 function isTyping() {

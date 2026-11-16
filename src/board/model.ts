@@ -47,11 +47,30 @@ export interface Page {
   dv: number;
 }
 
+/** A file pinned next to the board (split view). Shown to the teacher and student, never on the iPad. */
+export interface SideFile {
+  asset: string;
+  kind: "pdf" | "image";
+  name: string;
+  open: boolean;
+  /** version; higher wins */
+  v: number;
+}
+
+/** Each lesson has its own board; a new lesson never overwrites the previous one. */
+export interface LessonInfo {
+  id: string;
+  started: number;
+}
+
 export interface BoardState {
   pages: Record<string, Page>;
   strokes: Record<string, Stroke>;
   current: { page: string; ts: number };
+  /** on = the student can only point (laser), not write. This is the default. */
   lock: { on: boolean; ts: number };
+  side?: SideFile | null;
+  lesson?: LessonInfo;
 }
 
 export const PAGE_W = 1000;
@@ -59,9 +78,24 @@ export const BLANK_H = 625;
 
 export const uid = () => crypto.randomUUID().replace(/-/g, "").slice(0, 16);
 
-export function emptyState(): BoardState {
+export function emptyState(lesson?: LessonInfo): BoardState {
   const first: Page = { id: "p-first", order: 0, w: PAGE_W, h: BLANK_H, del: false, dv: 0 };
-  return { pages: { [first.id]: first }, strokes: {}, current: { page: first.id, ts: 0 }, lock: { on: false, ts: 0 } };
+  return {
+    pages: { [first.id]: first }, strokes: {}, current: { page: first.id, ts: 0 },
+    lock: { on: true, ts: 0 }, side: null, ...(lesson ? { lesson } : {}),
+  };
+}
+
+/** Which of two lessons is the newer one (the one everybody should be on). */
+export function newerLesson(a: LessonInfo | undefined, b: LessonInfo | undefined): boolean {
+  if (!a) return false;
+  if (!b) return true;
+  return a.started > b.started || (a.started === b.started && a.id > b.id);
+}
+
+/** True when a board has anything worth keeping (ink or an imported file). */
+export function hasContent(st: BoardState): boolean {
+  return Object.values(st.strokes).some((s) => !s.del) || Object.values(st.pages).some((p) => !p.del && !!p.bg);
 }
 
 export type BoardOp =
@@ -72,6 +106,7 @@ export type BoardOp =
   | { t: "b.tpl"; page: string; tpl: Template; tv: number }
   | { t: "b.go"; page: string; ts: number }
   | { t: "b.lock"; on: boolean; ts: number }
+  | { t: "b.side"; side: SideFile }
   | { t: "b.sync"; state: BoardState };
 
 /** Applies an op; returns true if anything changed. */
@@ -127,8 +162,16 @@ export function applyOp(st: BoardState, op: BoardOp): boolean {
         return true;
       }
       return false;
+    case "b.side": return mergeSide(st, op.side);
     case "b.sync": return mergeState(st, op.state);
   }
+}
+
+function mergeSide(st: BoardState, side: SideFile | null | undefined): boolean {
+  if (!side) return false;
+  if (st.side && st.side.v >= side.v) return false;
+  st.side = { ...side };
+  return true;
 }
 
 function newer(dv: number, del: boolean, curDv: number, curDel: boolean) {
@@ -190,6 +233,7 @@ export function mergeState(st: BoardState, other: BoardState): boolean {
     st.lock = { ...other.lock };
     changed = true;
   }
+  changed = mergeSide(st, other.side) || changed;
   return changed;
 }
 

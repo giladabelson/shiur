@@ -7,7 +7,11 @@
     "dev": "npm run build && wrangler dev",
     "build": "node scripts/copy-mp.mjs && tsc && vite build",
     "deploy": "npm run build && wrangler deploy",
-    "test:e2e": "node tests/e2e.mjs"
+    "test:e2e": "node tests/e2e.mjs",
+    "test:features": "node tests/features.mjs",
+    "test:session": "node tests/user-session.mjs",
+    "test:lesson": "node tests/lesson-features.mjs",
+    "dev:cloud": "npm run build && wrangler dev -c tests/wrangler.r2.jsonc --port 8788"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261027.1",

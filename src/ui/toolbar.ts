@@ -70,11 +70,29 @@ function choice(text: string, on: boolean, onclick: () => void, ic?: string) {
   return h("button", { class: `pop-item ${on ? "on" : ""}`, type: "button", onclick }, ic ? icon(ic, 18) : null, text);
 }
 
-export function buildToolbar(board: Board, view: BoardView, opts: { isTeacher: boolean; isStaff: boolean; roomName: string }) {
+export interface ToolbarOpts {
+  isTeacher: boolean;
+  isStaff: boolean;
+  roomName: string;
+  /** Teacher: choose a file to pin next to the board (split view). */
+  pickSideFile?: () => void;
+  /** Teacher: earlier lessons and their PDFs. */
+  openLessons?: () => void;
+  /** Teacher: save this lesson's PDF now. */
+  saveLessonNow?: () => void;
+}
+
+/** Tools a student may use while the teacher hasn't allowed writing. */
+const POINT_TOOLS: ViewTool[] = ["laser", "pan"];
+
+export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
   const toolBtns = new Map<ViewTool, HTMLButtonElement>();
   const pageLabel = h("span", { class: "pagelbl" });
   const zoomBtn = h("button", { class: "zoomlbl", type: "button", title: "זום" });
-  const lockBtn = iconBtn("unlock", "נעילה: רק המורה כותב", () => board.setLock(!board.state.lock.on));
+  const lockBtn = iconBtn("lock", "התלמיד רק מצביע", () => {
+    board.setLock(!board.state.lock.on);
+    toast(board.state.lock.on ? "התלמיד יכול רק להצביע עם העכבר" : "התלמיד יכול עכשיו לכתוב על הלוח");
+  });
   const styleBtn = h("button", { class: "ibtn stylebtn", type: "button", title: "צבע ועובי", "aria-label": "צבע ועובי" }, h("span", { class: "dot" }));
   const fileInput = h("input", { type: "file", accept: "application/pdf,image/*", hidden: true }) as HTMLInputElement;
   let favs = loadFavs();
@@ -108,7 +126,10 @@ export function buildToolbar(board: Board, view: BoardView, opts: { isTeacher: b
     });
   };
 
+  /** Student without permission to write: only the pointer (and moving the page). */
+  const pointOnly = () => !opts.isStaff && board.state.lock.on;
   const setTool = (t: ViewTool) => {
+    if (pointOnly() && !POINT_TOOLS.includes(t)) t = "laser";
     view.tool = t;
     if (t !== "lasso") view.clearSelection();
     if (t === "hl" && !HL_COLORS.includes(view.color)) view.color = HL_COLORS[0];
@@ -217,7 +238,7 @@ export function buildToolbar(board: Board, view: BoardView, opts: { isTeacher: b
     board.canPaste ? choice("הדבק כאן", false, () => { closePop(); view.pasteHere(); }, "paste") : null,
     label("רקע לעמוד"),
     h("div", { class: "pop-grid tpl" }, ...TEMPLATES.map((t) =>
-      choice(t.label, (board.currentPage.tpl ?? "blank") === t.id, () => { closePop(); if (board.currentPage.bg) toast("לעמוד עם PDF או תמונה אין רקע"); else board.setTemplate(t.id); }))),
+      choice(t.label, (board.currentPage.tpl ?? "grid") === t.id, () => { closePop(); if (board.currentPage.bg) toast("לעמוד עם PDF או תמונה אין רקע"); else board.setTemplate(t.id); }))),
     h("hr"),
     choice("נקה את העמוד", false, () => { closePop(); if (confirm("לנקות את כל הכתוב בעמוד הזה?")) board.clearPage(); }, "trash"),
     choice("מחק את העמוד", false, () => { closePop(); if (confirm("למחוק את העמוד הזה?")) board.deletePage(); }, "pageDel"),
@@ -254,10 +275,18 @@ export function buildToolbar(board: Board, view: BoardView, opts: { isTeacher: b
     }
   };
   const fileMenu = () => h("div", null,
-    choice("העלה PDF או תמונה", false, () => { closePop(); fileInput.click(); }, "upload"),
+    choice("העלה PDF או תמונה ללוח", false, () => { closePop(); fileInput.click(); }, "upload"),
+    opts.pickSideFile ? choice(board.state.side ? "החלף את הקובץ שבצד המסך" : "הצג קובץ בצד המסך (תצוגה מפוצלת)", false, () => { closePop(); opts.pickSideFile!(); }, "split") : null,
     opts.isStaff ? choice("מחשבון גרפים Desmos", false, () => { closePop(); openDesmos((blob) => void board.importFile(blob, "desmos.png")); }, "graph") : null,
     choice("שמור את העמוד כתמונה", false, () => { closePop(); void exportPng(); }, "download"),
     choice("ייצא את כל הלוח ל-PDF", false, () => { closePop(); void exportAll(); }, "pdf"),
+    opts.isTeacher ? h("hr") : null,
+    opts.saveLessonNow ? choice("שמור עכשיו PDF של השיעור", false, () => { closePop(); opts.saveLessonNow!(); }, "pdf") : null,
+    opts.openLessons ? choice("שיעורים קודמים (PDF)", false, () => { closePop(); opts.openLessons!(); }, "history") : null,
+    opts.isTeacher ? choice("התחל שיעור חדש (הלוח הנוכחי נשמר)", false, () => {
+      closePop();
+      if (confirm("להתחיל שיעור חדש? הלוח הנוכחי יישמר כ-PDF ויתחיל לוח ריק.")) board.newLesson();
+    }, "plus") : null,
   );
   const fileMenuBtn = iconBtn("file", "קבצים", () => popover(fileMenuBtn, fileMenu));
   zoomBtn.addEventListener("click", () => popover(zoomBtn, () => h("div", null,
@@ -303,15 +332,25 @@ export function buildToolbar(board: Board, view: BoardView, opts: { isTeacher: b
     fileInput,
   );
 
+  let wasLocked: boolean | null = null;
   function refresh() {
     const ps = board.pages;
     const i = ps.findIndex((p) => p.id === board.currentPage.id);
     pageLabel.textContent = `${board.currentPage.priv ? "🔒 " : ""}${i + 1}/${ps.length}`;
     zoomBtn.textContent = `${view.zoomPct}%`;
     const locked = board.state.lock.on;
-    lockBtn.classList.toggle("on", locked);
+    lockBtn.classList.toggle("on", !locked);
     lockBtn.replaceChildren(icon(locked ? "lock" : "unlock"));
-    lockBtn.title = locked ? "הלוח נעול לתלמיד. לחץ לפתיחה" : "נעל: רק המורה כותב";
+    lockBtn.title = locked ? "התלמיד רק מצביע עם העכבר. לחץ כדי לאפשר לו לכתוב" : "התלמיד יכול לכתוב. לחץ כדי שרק יצביע";
+    lockBtn.setAttribute("aria-label", lockBtn.title);
+    // Student: drawing tools are greyed out until the teacher allows writing.
+    if (!opts.isStaff) {
+      for (const [id, b] of toolBtns) b.disabled = locked && !POINT_TOOLS.includes(id);
+      for (const b of favBtns) b.disabled = locked;
+      styleBtn.disabled = locked;
+      if (locked !== wasLocked) setTool(locked ? "laser" : "pen");
+      wasLocked = locked;
+    }
     refreshTools();
   }
 
