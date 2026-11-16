@@ -82,6 +82,12 @@ try {
   // whiteboard
   await drawLine(teacher.page, 200, 200, 500, 300);
   ok("teacher stroke reaches student", await until(async () => (await strokeCount(student.page)) === 1));
+  // default: the student can only point, not write
+  ok("student starts in pointer-only mode", await student.page.evaluate(() => window.__board.state.lock.on && window.__view.tool === "laser"));
+  await drawLine(student.page, 300, 400, 600, 350);
+  ok("student cannot write by default", (await strokeCount(teacher.page)) === 1 && (await strokeCount(student.page)) === 1);
+  await teacher.page.click('button[aria-label^="התלמיד רק מצביע"]');
+  ok("teacher allows writing", await until(() => student.page.evaluate(() => !window.__board.state.lock.on && window.__view.tool === "pen")));
   await drawLine(student.page, 300, 400, 600, 350);
   ok("student stroke reaches teacher", await until(async () => (await strokeCount(teacher.page)) === 2));
   await teacher.page.keyboard.press("Control+z");

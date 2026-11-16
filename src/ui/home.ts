@@ -2,6 +2,7 @@
 
 import QRCode from "qrcode";
 import { h, icon, toast, clear } from "./dom";
+import { openLessonsDialog } from "./lessons-dialog";
 
 interface Student {
   id: string;
@@ -75,6 +76,7 @@ export function renderHome(root: HTMLElement) {
             h("a", { class: "btn", href: `${roomUrl(s.room, "teacher")}&n=${encodeURIComponent(s.name)}` }, icon("cam", 18), " התחל שיעור"),
             h("button", { class: "btn ghost", onclick: () => copy(roomUrl(s.room)) }, icon("copy", 18), " לינק לתלמיד"),
             h("button", { class: "btn ghost", onclick: () => qrDialog(s.room, s.name) }, icon("ipad", 18), " חבר אייפד"),
+            h("button", { class: "btn ghost", onclick: () => openLessonsDialog(s.room, s.name) }, icon("history", 18), " שיעורים קודמים"),
             h("button", {
               class: "btn ghost danger",
               title: "מחק",

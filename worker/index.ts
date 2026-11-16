@@ -5,6 +5,10 @@ export interface Env {
   ASSETS: Fetcher;
   TURN_KEY_ID?: string;
   TURN_KEY_API_TOKEN?: string;
+  /** Optional R2 bucket for end-of-lesson PDFs (see README: "Lesson PDFs"). */
+  LESSONS?: R2Bucket;
+  /** How many days lesson PDFs are kept (default 30). */
+  LESSON_KEEP_DAYS?: string;
 }
 
 type Role = "teacher" | "student" | "ipad";
@@ -47,9 +51,94 @@ export default {
 
     if (url.pathname === "/api/health") return new Response("ok");
 
+    if (url.pathname.startsWith("/api/lessons/")) return lessons(req, env, url);
+
     return env.ASSETS.fetch(req);
   },
 } satisfies ExportedHandler<Env>;
+
+const LESSON_RE = /^[\w-]{4,40}$/;
+const MAX_PDF = 40 * 1024 * 1024;
+const MAX_LESSONS_PER_ROOM = 200;
+
+/**
+ * End-of-lesson PDFs, one per lesson, kept for LESSON_KEEP_DAYS:
+ *   GET  /api/lessons/<room>                 list (JSON)
+ *   PUT  /api/lessons/<room>/<lesson>        upload (body = PDF; ?name=&started=)
+ *   GET  /api/lessons/<room>/<lesson>.pdf    download
+ * The room id in the link is the key, like the lesson link itself.
+ */
+async function lessons(req: Request, env: Env, url: URL): Promise<Response> {
+  const [, , , room = "", file = ""] = url.pathname.split("/");
+  if (!ID_RE.test(room)) return new Response("bad room", { status: 400 });
+  const bucket = env.LESSONS;
+  if (!bucket) return Response.json({ enabled: false, items: [] }, { status: req.method === "GET" && !file ? 200 : 501 });
+  const keepMs = (Number(env.LESSON_KEEP_DAYS) || 30) * 86400_000;
+
+  if (!file && req.method === "GET") {
+    const listed = await bucket.list({ prefix: `${room}/`, include: ["customMetadata"] });
+    const items = [];
+    const expired: string[] = [];
+    for (const o of listed.objects) {
+      if (Date.now() - o.uploaded.getTime() > keepMs) { expired.push(o.key); continue; }
+      const lesson = o.key.slice(room.length + 1).replace(/\.pdf$/, "");
+      items.push({
+        lesson,
+        name: o.customMetadata?.name ?? "",
+        started: Number(o.customMetadata?.started) || o.uploaded.getTime(),
+        pages: Number(o.customMetadata?.pages) || 0,
+        size: o.size,
+        uploaded: o.uploaded.getTime(),
+        url: `/api/lessons/${room}/${lesson}.pdf`,
+      });
+    }
+    if (expired.length) await bucket.delete(expired);
+    items.sort((a, b) => b.started - a.started);
+    return Response.json({ enabled: true, keepDays: keepMs / 86400_000, items }, { headers: { "Cache-Control": "no-store" } });
+  }
+
+  const lesson = file.replace(/\.pdf$/, "");
+  if (!LESSON_RE.test(lesson)) return new Response("bad lesson", { status: 400 });
+  const key = `${room}/${lesson}.pdf`;
+
+  if (req.method === "PUT") {
+    const len = Number(req.headers.get("Content-Length") || 0);
+    if (len > MAX_PDF) return new Response("too large", { status: 413 });
+    const body = await req.arrayBuffer();
+    if (body.byteLength > MAX_PDF || body.byteLength < 8) return new Response("bad size", { status: 413 });
+    if (new TextDecoder().decode(body.slice(0, 5)) !== "%PDF-") return new Response("not a pdf", { status: 415 });
+    const count = (await bucket.list({ prefix: `${room}/`, limit: MAX_LESSONS_PER_ROOM + 1 })).objects.length;
+    if (count >= MAX_LESSONS_PER_ROOM && !(await bucket.head(key))) return new Response("too many lessons", { status: 429 });
+    await bucket.put(key, body, {
+      httpMetadata: { contentType: "application/pdf" },
+      customMetadata: {
+        name: (url.searchParams.get("name") ?? "").slice(0, 120),
+        started: String(Number(url.searchParams.get("started")) || Date.now()),
+        pages: String(Number(url.searchParams.get("pages")) || 0),
+      },
+    });
+    return Response.json({ ok: true, url: `/api/lessons/${room}/${lesson}.pdf` });
+  }
+
+  if (req.method === "GET") {
+    const obj = await bucket.get(key);
+    if (!obj || Date.now() - obj.uploaded.getTime() > keepMs) return new Response("not found", { status: 404 });
+    const name = obj.customMetadata?.name || `lesson-${lesson}.pdf`;
+    return new Response(obj.body, {
+      headers: {
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `inline; filename="lesson.pdf"; filename*=UTF-8''${encodeURIComponent(name)}`,
+        "Cache-Control": "private, max-age=300",
+      },
+    });
+  }
+
+  if (req.method === "DELETE") {
+    await bucket.delete(key);
+    return Response.json({ ok: true });
+  }
+  return new Response("method not allowed", { status: 405 });
+}
 
 async function iceServers(env: Env): Promise<RTCIceServer[]> {
   const stun: RTCIceServer[] = [{ urls: ["stun:stun.cloudflare.com:3478", "stun:stun.l.google.com:19302"] }];

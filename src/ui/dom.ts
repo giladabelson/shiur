@@ -90,6 +90,10 @@ const P: Record<string, string> = {
   eye: '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
   dash: '<path d="M3 12h3M9 12h3M15 12h3M21 12h0"/>',
   blur: '<circle cx="12" cy="9" r="3.2"/><path d="M6.5 19a5.5 5.5 0 0 1 11 0"/><circle cx="3.5" cy="5" r=".9" fill="currentColor"/><circle cx="20.5" cy="5" r=".9" fill="currentColor"/><circle cx="3.5" cy="12" r=".9" fill="currentColor"/><circle cx="20.5" cy="12" r=".9" fill="currentColor"/><circle cx="3.5" cy="19" r=".9" fill="currentColor"/><circle cx="20.5" cy="19" r=".9" fill="currentColor"/>',
+  split: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M12 3v18"/><path d="M15 8h3M15 12h3M15 16h2"/>',
+  close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  history: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
+  share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>',
   dots: '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
 };
 

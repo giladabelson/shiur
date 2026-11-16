@@ -1,0 +1,16 @@
+// Local test config: the same worker with an R2 bucket for lesson PDFs (simulated by wrangler dev,
+// nothing is created in the cloud). Usage: npx wrangler dev -c tests/wrangler.r2.jsonc --port 8788
+{
+  "name": "shiur-test",
+  "main": "../worker/index.ts",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "../dist/",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "durable_objects": { "bindings": [{ "name": "ROOM", "class_name": "Room" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
+  "r2_buckets": [{ "binding": "LESSONS", "bucket_name": "shiur-lessons-test" }]
+}

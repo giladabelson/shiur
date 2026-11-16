@@ -24,6 +24,10 @@ export interface Quality {
   limit?: string;
 }
 
+const LIVE_LIFETIME_MS = 250;
+/** File chunks wait while this much is queued, so strokes sent meanwhile aren't stuck behind a PDF. */
+const PACED_LIMIT = 256 * 1024;
+
 const ENCODING: Record<"cam" | "screen", RTCRtpEncodingParameters> = {
   cam: { maxBitrate: 1_200_000, maxFramerate: 30 },
   screen: { maxBitrate: 2_500_000, maxFramerate: 15 },
@@ -138,8 +142,10 @@ export class PeerLink {
       screen: pc.addTransceiver("video", { direction: "sendonly" }),
     };
     const ops = pc.createDataChannel("ops", { negotiated: true, id: 0, ordered: true });
-    const live = pc.createDataChannel("live", { negotiated: true, id: 1, ordered: false, maxRetransmits: 0 });
-    ops.bufferedAmountLowThreshold = 256 * 1024;
+    // Live ink / laser: unordered, and a lost packet is retried for a short while only, so a dropped
+    // Wi-Fi packet doesn't leave a gap in a stroke but nothing ever queues up behind it.
+    const live = pc.createDataChannel("live", { negotiated: true, id: 1, ordered: false, maxPacketLifeTime: LIVE_LIFETIME_MS });
+    ops.bufferedAmountLowThreshold = PACED_LIMIT / 2;
     ops.onopen = () => this.onOpsOpen();
     ops.onmessage = (e) => this.handleData(e.data, "ops");
     live.onmessage = (e) => this.handleData(e.data, "live");
@@ -305,7 +311,7 @@ export class PeerLink {
   async sendOpsPaced(msg: object): Promise<boolean> {
     const ops = this.ops;
     if (!ops) return false;
-    while (ops.readyState === "open" && ops.bufferedAmount > 1024 * 1024) {
+    while (ops.readyState === "open" && ops.bufferedAmount > PACED_LIMIT) {
       await new Promise<void>((res) => {
         const done = () => { ops.removeEventListener("bufferedamountlow", done); res(); };
         ops.addEventListener("bufferedamountlow", done);

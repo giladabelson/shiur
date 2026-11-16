@@ -1,8 +1,8 @@
 // Board controller: owns the state, applies local actions, syncs with peers, persists to IndexedDB.
 
 import {
-  applyOp, emptyState, livePages, pageStrokes, uid, compactPts, opPage, isPrivate, PAGE_W, BLANK_H,
-  type BoardOp, type BoardState, type Page, type Pt, type Stroke, type Tool, type Template,
+  applyOp, emptyState, livePages, pageStrokes, uid, compactPts, opPage, isPrivate, newerLesson, hasContent, PAGE_W, BLANK_H,
+  type BoardOp, type BoardState, type LessonInfo, type Page, type Pt, type Stroke, type Tool, type Template,
 } from "./model";
 import { loadBoard, saveBoard, loadAsset, saveAsset, hashBytes, toB64, fromB64 } from "./store";
 import { pdfPageSizes, imageSize, assetArrived } from "./pdf";
@@ -48,6 +48,15 @@ const CHUNK = 16 * 1024;
 const SYNC_BATCH = 120_000; // bytes of JSON per sync message (SCTP messages must stay small)
 export const TEMP_HOLD_MS = 3500;
 export const TEMP_FADE_MS = 900;
+/** A teacher who comes back after this long without any board activity starts a new lesson. */
+export const LESSON_GAP_MS = 3 * 3600 * 1000;
+/** A teacher device with no saved board waits this long for a lesson already running on another device. */
+const ADOPT_WAIT_MS = 4000;
+/** State-changing ops are tagged with the lesson id, so ink from an old lesson never leaks into a new one. */
+const LESSON_OPS = new Set(["b.page", "b.stroke", "b.vis", "b.upd", "b.tpl", "b.go", "b.lock", "b.side"]);
+
+/** Board state as stored on this device, with the time of the last change. */
+type Saved = BoardState & { act?: number };
 
 export function applyMat(m: Mat, x: number, y: number): [number, number] {
   return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
@@ -69,9 +78,17 @@ export class Board {
   private incoming = new Map<string, { mime: string; name: string; n: number; parts: (Uint8Array | undefined)[]; got: number }>();
   private requested = new Map<string, number>();
   private haveAssets = new Set<string>();
+  private lastAct = 0;
+  /** Teacher device that had no saved board: may still join a lesson that is already running on another device. */
+  private adoptable = false;
+  private adoptTimer: number | undefined;
+  /** This device loaded a board saved before lessons had ids: it must never mix into a lesson. */
+  private legacyLoaded = false;
   /** Called with what changed so the view can redraw only what it needs. */
-  onChange: (what: "all" | "live" | "page" | "lock" | "stroke", strokeId?: string) => void = () => {};
+  onChange: (what: "all" | "live" | "page" | "lock" | "stroke" | "side" | "lesson", strokeId?: string) => void = () => {};
   onNotice: (text: string) => void = () => {};
+  /** A finished lesson was put aside (its board is kept on this device and should be saved as PDF). */
+  onLessonArchived: (state: BoardState) => void = () => {};
 
   constructor(readonly roomId: string, readonly me: string, readonly role: string, private net: BoardTransport) {}
 
@@ -79,19 +96,95 @@ export class Board {
     return this.role !== "student";
   }
 
-  async load() {
-    const saved = await loadBoard(this.roomId);
+  get lesson(): LessonInfo {
+    return this.state.lesson ?? { id: "legacy", started: 0 };
+  }
+
+  /**
+   * Loads this room's board. The teacher's device decides when a new lesson starts: when nothing
+   * was saved, or when the saved board has been idle for a few hours. The previous board is kept.
+   */
+  async load(now = Date.now()) {
+    const saved = (await loadBoard(this.roomId)) as Saved | undefined;
     if (saved && saved.pages) {
       this.state = saved;
-      if (!this.state.lock) this.state.lock = { on: false, ts: 0 };
+      if (!this.state.lock) this.state.lock = { on: true, ts: 0 };
+      if (this.state.side === undefined) this.state.side = null;
+      this.lastAct = saved.act ?? Math.max(0, ...Object.values(saved.strokes).map((s) => s.ts));
+      this.legacyLoaded = !saved.lesson && hasContent(saved);
+    }
+    if (this.role === "teacher") {
+      if (!saved?.pages) {
+        // A new computer / cleared browser: join the lesson the iPad or student is already on, if any.
+        this.state = emptyState();
+        this.adoptable = true;
+        this.adoptTimer = window.setTimeout(() => this.ensureLesson(), ADOPT_WAIT_MS);
+      } else if (!this.state.lesson || now - this.lastAct > LESSON_GAP_MS) {
+        this.archiveAndReset({ id: uid(), started: now });
+      }
+      this.persist();
     }
     this.onChange("all");
     void this.checkAssets();
   }
 
+  /** Teacher: if no lesson was found on another device, start one. */
+  private ensureLesson() {
+    clearTimeout(this.adoptTimer);
+    this.adoptable = false;
+    if (this.state.lesson || this.role !== "teacher") return;
+    const lesson = { id: uid(), started: Date.now() };
+    this.state.lesson = lesson;
+    this.persist();
+    this.net.broadcastOps({ t: "b.lesson", lesson });
+  }
+
+  /** Teacher: start a new lesson now. The current board is kept and saved as PDF. */
+  newLesson() {
+    clearTimeout(this.adoptTimer);
+    const lesson = { id: uid(), started: Math.max(Date.now(), this.lesson.started + 1) };
+    this.archiveAndReset(lesson);
+    this.adoptable = false;
+    this.persist();
+    this.net.broadcastOps({ t: "b.lesson", lesson });
+    this.onChange("lesson");
+    this.onChange("all");
+  }
+
+  private archiveAndReset(lesson: LessonInfo) {
+    const old = this.state;
+    if (hasContent(old)) {
+      const key = `${this.roomId}@${old.lesson?.id ?? "legacy-" + (this.lastAct || Date.now())}`;
+      void saveBoard(key, { ...old, act: this.lastAct } as Saved);
+      this.onLessonArchived(old);
+    }
+    this.state = emptyState(lesson);
+    this.live.clear();
+    this.previews.clear();
+    this.temps.clear();
+    this.undoStack = [];
+    this.redoStack = [];
+    this.lastAct = Date.now();
+  }
+
+  /** Another device is on a newer lesson: put ours aside and follow it. */
+  private followLesson(lesson: LessonInfo) {
+    if (this.role === "teacher") this.archiveAndReset(lesson);
+    else {
+      // Students and the iPad don't keep old lessons; the teacher's device does.
+      this.state = emptyState(lesson);
+      this.live.clear();
+      this.previews.clear();
+      this.undoStack = [];
+      this.redoStack = [];
+    }
+    this.persist();
+    this.onChange("lesson");
+  }
+
   private persist() {
     clearTimeout(this.saveTimer);
-    this.saveTimer = window.setTimeout(() => void saveBoard(this.roomId, this.state), 800);
+    this.saveTimer = window.setTimeout(() => void saveBoard(this.roomId, { ...this.state, act: this.lastAct } as Saved), 800);
   }
 
   private privateOp(op: object) {
@@ -99,16 +192,19 @@ export class Board {
   }
 
   private local(op: BoardOp) {
+    if (!this.state.lesson && this.role === "teacher") this.ensureLesson();
     if (applyOp(this.state, op)) {
+      if (op.t !== "b.go") this.lastAct = Date.now();
       this.persist();
       this.notify(op);
     }
-    this.net.broadcastOps(op, this.privateOp(op));
+    this.net.broadcastOps({ ...op, L: this.state.lesson?.id }, this.privateOp(op));
   }
 
   private notify(op: BoardOp) {
     if (op.t === "b.go") this.onChange("page");
     else if (op.t === "b.lock") this.onChange("lock");
+    else if (op.t === "b.side") this.onChange("side");
     else if (op.t === "b.stroke") this.onChange("stroke", op.s.id);
     else this.onChange("all");
   }
@@ -200,8 +296,8 @@ export class Board {
   }
 
   /** Streams an in-progress stroke. `replace` sends the whole point list (used for shapes). */
-  sendLive(ls: Omit<LiveStroke, "at" | "author" | "pts">, pts: Pt[], replace = false) {
-    this.net.broadcastLive({ t: "b.live", ...ls, pts, rep: replace }, isPrivate(this.state, ls.page));
+  sendLive(ls: Omit<LiveStroke, "at" | "author" | "pts">, pts: Pt[], replace = false, offset?: number) {
+    this.net.broadcastLive({ t: "b.live", ...ls, pts, rep: replace, o: offset }, isPrivate(this.state, ls.page));
   }
 
   /** One undo step for a whole eraser drag. */
@@ -441,9 +537,37 @@ export class Board {
     this.go(pages[0].id);
   }
 
+  /** Split view: pin a PDF or image next to the board for the teacher and the student. */
+  async setSideFile(file: File | Blob, name = (file as File).name ?? "image.png") {
+    const data = await file.arrayBuffer();
+    const mime = file.type || (name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "");
+    const kind = mime === "application/pdf" ? "pdf" : mime.startsWith("image/") ? "image" : null;
+    if (!kind) {
+      this.onNotice("אפשר להציג בצד רק PDF או תמונה");
+      return;
+    }
+    const id = await hashBytes(data);
+    await saveAsset({ id, mime, name, data });
+    this.haveAssets.add(id);
+    this.local({ t: "b.side", side: { asset: id, kind, name, open: true, v: this.nextSideV() } });
+  }
+
+  /** Open or close the side panel for everyone. */
+  setSideOpen(open: boolean) {
+    const cur = this.state.side;
+    if (!cur || cur.open === open) return;
+    this.local({ t: "b.side", side: { ...cur, open, v: this.nextSideV() } });
+  }
+
+  private nextSideV() {
+    return Math.max(Date.now(), (this.state.side?.v ?? 0) + 1);
+  }
+
   private async checkAssets() {
     const needed = new Set<string>();
     for (const p of this.pages) if (p.bg) needed.add(p.bg.asset);
+    // The iPad is a writing surface only: it never shows the side file, so it doesn't download it.
+    if (this.state.side && this.role !== "ipad") needed.add(this.state.side.asset);
     for (const id of needed) {
       if (this.haveAssets.has(id)) continue;
       if (await loadAsset(id)) {
@@ -460,7 +584,7 @@ export class Board {
 
   /** Students may only fetch files used on pages they can see. */
   private assetVisibleToStudents(id: string) {
-    return this.pages.some((p) => p.bg?.asset === id && !p.priv);
+    return this.state.side?.asset === id || this.pages.some((p) => p.bg?.asset === id && !p.priv);
   }
 
   private async sendAsset(peerId: string, id: string) {
@@ -508,10 +632,11 @@ export class Board {
     const pages: Record<string, Page> = {};
     for (const p of Object.values(this.state.pages)) if (visible(p.id)) pages[p.id] = p;
     const current = visible(this.state.current.page) ? this.state.current : { page: "", ts: -1 };
-    await this.net.sendTo(peerId, { t: "b.sync", state: { pages, strokes: {}, current, lock: this.state.lock } });
+    const lesson = this.state.lesson;
+    await this.net.sendTo(peerId, { t: "b.sync", state: { pages, strokes: {}, current, lock: this.state.lock, side: this.state.side ?? null, lesson } });
     let batch: Record<string, Stroke> = {};
     let size = 0;
-    const flush = () => this.net.sendTo(peerId, { t: "b.sync", state: { pages: {}, strokes: batch, current: { page: "", ts: -1 }, lock: { on: false, ts: -1 } } });
+    const flush = () => this.net.sendTo(peerId, { t: "b.sync", state: { pages: {}, strokes: batch, current: { page: "", ts: -1 }, lock: { on: false, ts: -1 }, lesson } });
     for (const s of Object.values(this.state.strokes)) {
       if (!visible(s.page)) continue;
       batch[s.id] = s;
@@ -525,8 +650,41 @@ export class Board {
     if (size > 0) await flush();
   }
 
+  /** Decides what to do with a board snapshot / lesson switch from a peer. Returns false to drop it. */
+  private acceptLesson(lesson: LessonInfo | undefined): boolean {
+    const mine = this.state.lesson;
+    // A device without a lesson id (an old version, or a teacher device still deciding) never
+    // pushes its board into a lesson.
+    if (!lesson) return !mine && this.role !== "teacher";
+    if (lesson.id === mine?.id) return true;
+    if (!mine && this.role === "teacher") {
+      if (!this.adoptable || Date.now() - lesson.started > LESSON_GAP_MS) return false;
+      // Join the lesson that is already running (our board is still empty).
+      clearTimeout(this.adoptTimer);
+      this.adoptable = false;
+      this.state.lesson = lesson;
+      this.persist();
+      return true;
+    }
+    if (!mine && !this.legacyLoaded) {
+      // We just hadn't heard the lesson id yet (e.g. ink written in the first seconds): keep it.
+      this.state.lesson = lesson;
+      this.persist();
+      return true;
+    }
+    if (newerLesson(lesson, mine)) {
+      this.legacyLoaded = false;
+      this.followLesson(lesson);
+      return true;
+    }
+    return false; // an older lesson: the peer will follow ours when it gets our snapshot
+  }
+
   handleRemote(peerId: string, msg: any) {
     switch (msg.t) {
+      case "b.lesson":
+        if (this.acceptLesson(msg.lesson)) this.onChange("all");
+        return;
       case "b.live": {
         let ls = this.live.get(msg.id);
         if (!ls) {
@@ -535,7 +693,10 @@ export class Board {
           this.live.set(msg.id, ls);
         }
         if (msg.rep) ls.pts = msg.pts;
-        else ls.pts.push(...msg.pts);
+        else if (typeof msg.o === "number") {
+          // Points carry their index, so messages that arrive late or out of order land in the right place.
+          for (let i = 0; i < msg.pts.length; i++) ls.pts[msg.o + i] = msg.pts[i];
+        } else ls.pts.push(...msg.pts);
         ls.at = performance.now();
         this.onChange("live");
         return;
@@ -564,13 +725,17 @@ export class Board {
         return;
     }
     if (typeof msg.t === "string" && msg.t.startsWith("b.")) {
+      if (msg.t === "b.sync" && !this.acceptLesson(msg.state?.lesson)) return;
+      // From another lesson (a device that missed the switch): never mix it into this one.
+      if (LESSON_OPS.has(msg.t) && msg.L && this.state.lesson && msg.L !== this.state.lesson.id) return;
       const op = msg as BoardOp;
       if (op.t === "b.stroke") this.live.delete(op.s.id);
       if (op.t === "b.upd") for (const it of op.items) this.previews.delete(it.id);
       if (applyOp(this.state, op)) {
+        if (op.t !== "b.go") this.lastAct = Date.now();
         this.persist();
         this.notify(op);
-        if (op.t === "b.page" || op.t === "b.sync") void this.checkAssets();
+        if (op.t === "b.page" || op.t === "b.sync" || op.t === "b.side") void this.checkAssets();
       }
     }
   }

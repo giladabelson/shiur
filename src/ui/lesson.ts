@@ -6,6 +6,11 @@ import { LocalMedia, listDevices, savePrefs, canShareScreen } from "../rtc/media
 import { Room, type Peer } from "../rtc/room";
 import type { Role } from "../rtc/signaling";
 import { buildToolbar } from "./toolbar";
+import { buildSidePanel, type SidePanel } from "./sidepanel";
+import { saveLessonPdf, tidyLessons } from "./lessons";
+import { openLessonsDialog } from "./lessons-dialog";
+import { hasContent } from "../board/model";
+import { downloadBlob } from "../board/export";
 import { h, icon, iconBtn, toast, clear, fmtDuration } from "./dom";
 
 const ROLE_TITLE: Record<Role, string> = { teacher: "מורה", student: "תלמיד", ipad: "אייפד" };
@@ -131,24 +136,70 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
     });
     (window as any).__board = board;
     board.onNotice = (t) => toast(t);
+    const roomName = lessonFileName();
+    // Teacher: a finished lesson's board is saved as a PDF (on this computer, and in the cloud if enabled).
+    if (role === "teacher") {
+      board.onLessonArchived = (st) => {
+        void saveLessonPdf(roomId, roomName, st)
+          .then((p) => { if (p) toast(p.uploaded ? "הלוח של השיעור הקודם נשמר כ-PDF" : "הלוח של השיעור הקודם נשמר כ-PDF במחשב הזה"); })
+          .catch((e) => console.warn("lesson pdf", e));
+      };
+    }
     const view = new BoardView(board);
     (window as any).__view = view;
     view.canDraw = () => board.canDraw(role);
-    const toolbar = buildToolbar(board, view, { isTeacher: role === "teacher", isStaff: role !== "student", roomName: lessonFileName() });
+
+    // split view: a file pinned next to the board (never on the iPad)
+    const sideInput = h("input", { type: "file", accept: "application/pdf,image/*", hidden: true }) as HTMLInputElement;
+    sideInput.addEventListener("change", async () => {
+      const f = sideInput.files?.[0];
+      sideInput.value = "";
+      if (!f) return;
+      if (f.size > 40 * 1024 * 1024) return toast("הקובץ גדול מדי (עד 40MB)");
+      try { await board.setSideFile(f); } catch (e) { console.error(e); toast("לא הצלחתי לפתוח את הקובץ"); }
+    });
+    const side: SidePanel | null = role === "ipad" ? null : buildSidePanel(board, { isTeacher: role === "teacher", pickFile: () => sideInput.click() });
+    (window as any).__side = side;
+
+    const saveNow = async () => {
+      if (!hasContent(board.state)) return toast("הלוח ריק, אין מה לשמור");
+      toast("שומר PDF של השיעור…");
+      try {
+        const p = await saveLessonPdf(roomId, roomName, board.state);
+        if (p) toast(p.uploaded ? "ה-PDF של השיעור נשמר (גם בענן)" : "ה-PDF של השיעור נשמר במחשב הזה");
+      } catch (e) {
+        console.error(e);
+        toast("לא הצלחתי לשמור PDF");
+      }
+    };
+    const toolbar = buildToolbar(board, view, {
+      isTeacher: role === "teacher", isStaff: role !== "student", roomName,
+      pickSideFile: role === "teacher" ? () => sideInput.click() : undefined,
+      openLessons: role === "teacher" ? () => openLessonsDialog(roomId, roomName.replace(/^שיעור-?/, "") || "השיעור") : undefined,
+      saveLessonNow: role === "teacher" ? () => void saveNow() : undefined,
+    });
     board.onChange = (what, strokeId) => {
       view.invalidate(what, strokeId);
-      if (what !== "live" && what !== "stroke") toolbar.refresh();
+      if (what !== "live" && what !== "stroke") {
+        toolbar.refresh();
+        side?.refresh();
+      }
       if (what === "lock") {
         updateLockBanner();
-        if (role === "student") toast(board.state.lock.on ? "המורה נעל את הלוח" : "אפשר לכתוב על הלוח");
+        if (role === "student") toast(board.state.lock.on ? "אפשר רק להצביע עם העכבר" : "המורה אישר: אפשר לכתוב על הלוח");
+      }
+      if (what === "lesson") {
+        updateLockBanner();
+        toast(role === "teacher" ? "התחיל שיעור חדש. הלוח הקודם נשמר." : "המורה התחיל שיעור חדש");
       }
     };
     await board.load();
+    if (role === "teacher") void tidyLessons(roomId, roomName, board.lesson.id).catch((e) => console.warn("tidy", e));
 
     const started = Date.now();
     const timerEl = h("span", { class: "timer", title: "זמן השיעור" }, "00:00");
     const netEl = h("span", { class: "net" });
-    const lockBanner = h("div", { class: "lockbanner", hidden: true }, icon("lock", 16), " המורה נעל את הלוח");
+    const lockBanner = h("div", { class: "lockbanner", hidden: true }, icon("laser", 16), " אפשר להצביע עם העכבר. כדי לכתוב, המורה צריך לאשר");
     const updateLockBanner = () => { lockBanner.hidden = !(role === "student" && board.state.lock.on); };
     updateLockBanner();
 
@@ -156,7 +207,7 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
     let stageSel: "board" | string = "board";
     let manualStage = false;
     const tabs = h("div", { class: "stage-tabs" });
-    const boardWrap = h("div", { class: "board-wrap" }, toolbar.el, h("div", { class: "board-host" }, view.el, lockBanner));
+    const boardWrap = h("div", { class: "board-wrap" }, toolbar.el, h("div", { class: "board-host" }, view.el, lockBanner, side?.reopen ?? null), sideInput);
     const screenVideo = h("video", { class: "screen-video", autoplay: true, playsInline: true, muted: true });
     const screenWrap = h("div", { class: "screen-wrap", hidden: true },
       screenVideo,
@@ -278,7 +329,7 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
     chatCtl.append(chatBadge);
     const tilesCtl = iconBtn("cam", "הצג / הסתר וידאו", () => { tiles.hidden = !tiles.hidden; }, "ctl");
     const infoCtl = iconBtn("gear", "הגדרות ואיכות חיבור", () => openSettings(), "ctl");
-    const leaveCtl = h("button", { class: "btn danger leave", type: "button", onclick: () => leave() }, icon("leave", 18), " יציאה");
+    const leaveCtl = h("button", { class: "btn danger leave", type: "button", onclick: () => void leave() }, icon("leave", 18), " יציאה");
 
     const drawControls = () => {
       const micLive = !!media.mic && !media.micMuted;
@@ -321,9 +372,10 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
     const unlockAudio = h("button", { class: "btn audio-unlock", hidden: true, onclick: () => playAll() }, icon("speaker", 18), " לחץ כאן כדי לשמוע");
 
     clear(root);
+    document.documentElement.classList.add("in-lesson");
     root.append(h("div", { class: `lesson role-${role}` },
       topbar, statusBanner,
-      h("div", { class: "lesson-body" }, stage, tiles, chatPanel),
+      h("div", { class: "lesson-body" }, stage, side?.el ?? null, tiles, chatPanel),
       controls, audioBox, unlockAudio,
     ));
     tiles.append(selfTile);
@@ -438,6 +490,7 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
     media.onChange = () => drawControls();
 
     drawControls();
+    side?.refresh();
     await room.start();
     room.syncLocal();
     updatePeers();
@@ -511,18 +564,35 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       dlg.showModal();
     }
 
-    function leave() {
+    async function leave() {
       if (!confirm("לצאת מהשיעור?")) return;
+      // Teacher: save the lesson's board as a PDF before leaving.
+      let saved: Awaited<ReturnType<typeof saveLessonPdf>> = null;
+      if (role === "teacher" && hasContent(board.state)) {
+        leaveCtl.disabled = true;
+        leaveCtl.replaceChildren(icon("pdf", 18), " שומר PDF…");
+        try {
+          saved = await Promise.race([
+            saveLessonPdf(roomId, roomName, board.state),
+            new Promise<null>((res) => setTimeout(() => res(null), 45_000)),
+          ]);
+        } catch (e) { console.error(e); }
+      }
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVis);
       room.leave();
       media.stopAll();
       view.destroy();
       try { wake?.release?.(); } catch { /* ignore */ }
+      document.documentElement.classList.remove("in-lesson");
       clear(root);
       root.append(h("main", { class: "prejoin" }, h("div", { class: "card prejoin-card" },
         h("h1", null, "יצאת מהשיעור"),
         h("p", { class: "muted" }, `משך: ${fmtDuration(Date.now() - started)}`),
+        saved ? h("p", { class: "saved-note" }, saved.uploaded
+          ? "ה-PDF של הלוח נשמר בענן ובמחשב הזה. אפשר להוריד אותו או לשלוח לתלמיד מ\"שיעורים קודמים\" במסך הראשי."
+          : "ה-PDF של הלוח נשמר במחשב הזה. אפשר להוריד אותו מ\"שיעורים קודמים\" במסך הראשי.") : null,
+        saved ? h("button", { class: "btn ghost", onclick: () => downloadBlob(saved!.blob, saved!.name) }, icon("download", 18), " הורד את ה-PDF") : null,
         h("button", { class: "btn", onclick: () => location.reload() }, "חזרה לשיעור"),
         role === "teacher" ? h("a", { class: "btn ghost", href: "/" }, "למסך הראשי") : null,
       )));

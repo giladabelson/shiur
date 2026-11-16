@@ -27,6 +27,8 @@ html, body {
   overscroll-behavior: none;
 }
 #app { height: 100%; }
+/* During a lesson nothing outside the board may scroll (iPad Safari would drag the whole page). */
+html.in-lesson, html.in-lesson body { overflow: hidden; }
 button, input, select { font: inherit; color: inherit; }
 a { color: #93c5fd; }
 [hidden] { display: none !important; }
@@ -225,3 +227,36 @@ a { color: #93c5fd; }
 .desmos-host { flex: 1; min-height: 0; background: #fff; border-radius: 8px; overflow: hidden; }
 
 .btn.ghost.on { background: #1e3a8a; }
+
+/* ---------- split view: file pinned next to the board ---------- */
+.sidefile {
+  position: relative; width: 38%; min-width: 220px; max-width: 70%; flex-shrink: 0;
+  display: flex; flex-direction: column; background: #0b1222; border-inline-start: 1px solid #334155;
+}
+.sidefile-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; background: var(--panel); min-height: 48px; }
+.sidefile-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.sidefile-tools { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.zoomlbl.static { display: inline-grid; place-items: center; cursor: default; }
+.sidefile-scroll {
+  flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; background: var(--page-bg);
+  touch-action: pan-x pan-y; -webkit-overflow-scrolling: touch;
+}
+.sidefile-pages { width: 100%; margin: 0 auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.sidefile-page, .sidefile-img { display: block; width: 100%; height: auto; background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,.2); -webkit-user-drag: none; user-select: none; }
+.sidefile-wait { color: #475569; text-align: center; padding: 30px 10px; }
+.sidefile-resizer { position: absolute; top: 0; bottom: 0; inset-inline-start: -5px; width: 10px; cursor: col-resize; z-index: 3; touch-action: none; }
+.sidefile-resizer:hover, .sidefile-resizer:active { background: rgba(59,130,246,.35); }
+.side-reopen { position: absolute; top: 8px; inset-inline-end: 8px; z-index: 4; padding: 6px 10px; font-size: 13px; }
+.ibtn:disabled { opacity: .3; cursor: not-allowed; }
+.ibtn:disabled:hover { background: transparent; }
+
+/* previous lessons */
+.lessons { display: grid; gap: 8px; margin-bottom: 12px; max-height: 60dvh; overflow-y: auto; }
+.lesson-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; background: var(--panel2); padding: 10px 12px; }
+.lesson-date { font-weight: 600; }
+.saved-note { color: #bbf7d0; }
+
+@media (max-width: 760px) {
+  .sidefile { width: auto !important; max-width: none; height: 40%; border: 0; border-top: 1px solid #334155; }
+  .sidefile-resizer { display: none; }
+}

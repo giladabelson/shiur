@@ -6,7 +6,7 @@ import fs from "node:fs";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8787";
 const OUT = process.argv[3] || "./shots";
-const PDF = process.argv[4];
+const PDF = process.argv[4] || new URL("./fixtures/worksheet.pdf", import.meta.url).pathname;
 fs.mkdirSync(OUT, { recursive: true });
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 const problems = [];
@@ -198,7 +198,8 @@ try {
     const pdfText = fs.readFileSync(pdfPath, "latin1");
     const pageCount = (pdfText.match(/\/Type\s*\/Page[^s]/g) || []).length;
     check(`PDF export: file "${dl.suggestedFilename()}" with ${pageCount} pages`, pdfText.startsWith("%PDF") && pageCount === 3);
-    check("PDF file name has the student's name", dl.suggestedFilename().includes("יואב"));
+    // Headless Chromium reports non-English download names as "download", so read the name the app chose.
+    check("PDF file name has the student's name", (await T.page.evaluate(() => window.__lastDownload || "")).includes("יואב"));
     await S.page.click('button[aria-label="עמוד הבא"]');
     await sleep(800);
     check("page navigation syncs to iPad", await until(() => I.page.evaluate(() => window.__board.pages.findIndex((p) => p.id === window.__board.currentPage.id) === 2)));

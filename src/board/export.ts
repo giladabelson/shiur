@@ -1,13 +1,32 @@
 // Export the whole board (all pages, backgrounds + ink) as one PDF file.
 
 import type { Board } from "./board";
+import { livePages, pageStrokes, type BoardState, type Page, type Stroke } from "./model";
 import { renderPage } from "./view";
+
+/** What the exporter needs from a board: its pages and the ink on each page. */
+export interface BoardLike {
+  pages: Page[];
+  strokes(pageId: string): Stroke[];
+}
+
+/**
+ * A saved board (e.g. a finished lesson) as something the exporter can render. Teacher-only
+ * pages are left out unless `withPrivate`, since the lesson PDF is meant for the student.
+ */
+export function boardOf(state: BoardState, withPrivate = false): BoardLike {
+  return {
+    pages: livePages(state).filter((p) => withPrivate || !p.priv),
+    strokes: (pageId: string) => pageStrokes(state, pageId),
+  };
+}
 
 const PAGE_PX = 1600; // render width per page: sharp enough to print, small enough for iPad memory
 
-export async function exportPdf(board: Board, onProgress: (done: number, total: number) => void): Promise<Blob> {
+export async function exportPdf(board: Board | BoardLike, onProgress: (done: number, total: number) => void = () => {}): Promise<Blob> {
   const { jsPDF } = await import("jspdf"); // loaded only when needed
   const pages = board.pages;
+  if (!pages.length) throw new Error("no pages");
   let doc: InstanceType<typeof jsPDF> | null = null;
   for (let i = 0; i < pages.length; i++) {
     const p = pages[i];
@@ -34,5 +53,6 @@ export function downloadBlob(blob: Blob, name: string) {
   document.body.append(a);
   a.click();
   a.remove();
+  (window as any).__lastDownload = name; // read by the automated tests
   setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
