@@ -82,6 +82,8 @@ try {
   // whiteboard
   await drawLine(teacher.page, 200, 200, 500, 300);
   ok("teacher stroke reaches student", await until(async () => (await strokeCount(student.page)) === 1));
+  // continuous board: writing on the last page adds a blank page after it
+  ok("blank page added after the written one", await until(() => student.page.evaluate(() => window.__board.pages.length === 2)));
   // default: the student can only point, not write
   ok("student starts in pointer-only mode", await student.page.evaluate(() => window.__board.state.lock.on && window.__view.tool === "laser"));
   await drawLine(student.page, 300, 400, 600, 350);
@@ -100,9 +102,9 @@ try {
   ok("locked student cannot draw", (await strokeCount(student.page)) === 1);
   await teacher.page.evaluate(() => window.__board.setLock(false));
 
-  // pages
+  // pages (the new page goes right after the current one, before the automatic blank page)
   await teacher.page.evaluate(() => window.__board.addPage());
-  ok("new page followed by student", await until(() => student.page.evaluate(() => window.__board.pages.length === 2 && window.__board.currentPage.id === window.__board.pages[1].id)));
+  ok("new page followed by student", await until(() => student.page.evaluate(() => window.__board.pages.length === 3 && window.__board.currentPage.id === window.__board.pages[1].id)));
 
   // chat
   await teacher.page.click('button[aria-label="צ\'אט"]');
@@ -140,7 +142,7 @@ try {
   // fresh device (empty storage) gets full board via snapshot
   const fresh = await join("student", "צופה");
   ok("third device connects to both", await until(async () => (await connectedCount(fresh.page)) === 2));
-  ok("snapshot syncs board to new device", await until(async () => (await strokeCount(fresh.page)) === 1 && (await fresh.page.evaluate(() => window.__board.pages.length)) === 2));
+  ok("snapshot syncs board to new device", await until(async () => (await strokeCount(fresh.page)) === 1 && (await fresh.page.evaluate(() => window.__board.pages.length)) === 3));
   await fresh.ctx.close();
   ok("closed tab is removed from teacher", await until(() => teacher.page.evaluate(() => window.__room.peers.size === 1), 15000));
 

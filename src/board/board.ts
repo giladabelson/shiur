@@ -1,7 +1,7 @@
 // Board controller: owns the state, applies local actions, syncs with peers, persists to IndexedDB.
 
 import {
-  applyOp, emptyState, livePages, pageStrokes, uid, compactPts, opPage, isPrivate, newerLesson, hasContent, PAGE_W, BLANK_H,
+  applyOp, emptyState, livePages, pageStrokes, uid, compactPts, opPage, isPrivate, newerLesson, hasContent, nextPageId, PAGE_W, BLANK_H,
   type BoardOp, type BoardState, type LessonInfo, type Page, type Pt, type Stroke, type Tool, type Template,
 } from "./model";
 import { loadBoard, saveBoard, loadAsset, saveAsset, hashBytes, toB64, fromB64 } from "./store";
@@ -50,13 +50,27 @@ export const TEMP_HOLD_MS = 3500;
 export const TEMP_FADE_MS = 900;
 /** A teacher who comes back after this long without any board activity starts a new lesson. */
 export const LESSON_GAP_MS = 3 * 3600 * 1000;
+/** Starting a lesson from the home screen starts a new board if the saved one was idle this long. */
+export const FRESH_GAP_MS = 10 * 60 * 1000;
 /** A teacher device with no saved board waits this long for a lesson already running on another device. */
 const ADOPT_WAIT_MS = 4000;
 /** State-changing ops are tagged with the lesson id, so ink from an old lesson never leaks into a new one. */
-const LESSON_OPS = new Set(["b.page", "b.stroke", "b.vis", "b.upd", "b.tpl", "b.go", "b.lock", "b.side"]);
+const LESSON_OPS = new Set(["b.page", "b.stroke", "b.vis", "b.upd", "b.tpl", "b.go", "b.lock", "b.follow", "b.side"]);
 
 /** Board state as stored on this device, with the time of the last change. */
 type Saved = BoardState & { act?: number };
+
+/**
+ * The visible part of the board, relative to the page at the screen's center: page-local center
+ * and visible width / height in page units. Sent by the teacher's devices so the student sees the same.
+ */
+export interface ViewMsg {
+  page: string;
+  cx: number;
+  cy: number;
+  w: number;
+  h: number;
+}
 
 export function applyMat(m: Mat, x: number, y: number): [number, number] {
   return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
@@ -89,6 +103,8 @@ export class Board {
   onNotice: (text: string) => void = () => {};
   /** A finished lesson was put aside (its board is kept on this device and should be saved as PDF). */
   onLessonArchived: (state: BoardState) => void = () => {};
+  /** Another device (the teacher's) moved its view and this device should follow. */
+  onRemoteView: (v: ViewMsg) => void = () => {};
 
   constructor(readonly roomId: string, readonly me: string, readonly role: string, private net: BoardTransport) {}
 
@@ -104,7 +120,7 @@ export class Board {
    * Loads this room's board. The teacher's device decides when a new lesson starts: when nothing
    * was saved, or when the saved board has been idle for a few hours. The previous board is kept.
    */
-  async load(now = Date.now()) {
+  async load(now = Date.now(), opts: { fresh?: boolean } = {}) {
     const saved = (await loadBoard(this.roomId)) as Saved | undefined;
     if (saved && saved.pages) {
       this.state = saved;
@@ -119,11 +135,16 @@ export class Board {
         this.state = emptyState();
         this.adoptable = true;
         this.adoptTimer = window.setTimeout(() => this.ensureLesson(), ADOPT_WAIT_MS);
-      } else if (!this.state.lesson || now - this.lastAct > LESSON_GAP_MS) {
+      } else if (
+        !this.state.lesson || now - this.lastAct > LESSON_GAP_MS ||
+        // The teacher started the lesson from the home screen and the board has been idle for a while.
+        (opts.fresh && hasContent(this.state) && now - this.lastAct > FRESH_GAP_MS)
+      ) {
         this.archiveAndReset({ id: uid(), started: now });
       }
       this.persist();
     }
+    this.ensureTrailingPage();
     this.onChange("all");
     void this.checkAssets();
   }
@@ -203,7 +224,7 @@ export class Board {
 
   private notify(op: BoardOp) {
     if (op.t === "b.go") this.onChange("page");
-    else if (op.t === "b.lock") this.onChange("lock");
+    else if (op.t === "b.lock" || op.t === "b.follow") this.onChange("lock");
     else if (op.t === "b.side") this.onChange("side");
     else if (op.t === "b.stroke") this.onChange("stroke", op.s.id);
     else this.onChange("all");
@@ -218,6 +239,44 @@ export class Board {
     const p = this.state.pages[this.state.current.page];
     if (p && !p.del) return p;
     return this.pages[0] ?? this.ensureAPage();
+  }
+
+  /**
+   * The page at the center of this device's screen became the current one because the user
+   * scrolled there. Only local: not sent to anyone and not a "go" (no version bump).
+   */
+  setCurrentLocal(pageId: string) {
+    const p = this.state.pages[pageId];
+    if (!p || p.del || this.state.current.page === pageId) return;
+    this.state.current = { page: pageId, ts: this.state.current.ts };
+    this.onChange("page");
+  }
+
+  /**
+   * Continuous board: as soon as there's ink on the last page, a blank page follows it, so the
+   * teacher can just scroll down and keep writing. Only the teacher's devices add it; its id is
+   * derived from the last page's, so the computer and the iPad adding it at once make one page.
+   */
+  private ensureTrailingPage(strokePage?: string) {
+    // strokePage: ink was just committed there. Without it (load / sync), only check the board.
+    if (!this.isStaff) return;
+    if (this.role === "teacher" && !this.state.lesson) return; // still waiting to join a running lesson
+    const ps = this.pages;
+    const last = ps[ps.length - 1];
+    if (!last) return;
+    if (strokePage !== undefined && strokePage !== last.id) return;
+    if (!Object.values(this.state.strokes).some((s) => s.page === last.id && !s.del)) return;
+    const id = nextPageId(last.id);
+    const old = this.state.pages[id];
+    if (old && !old.del) return;
+    // The teacher deleted that page: bring it back only when there's new ink on the last page.
+    if (old && strokePage === undefined) return;
+    const tpl = last.bg ? undefined : last.tpl;
+    const page: Page = {
+      id, order: last.order + 1, w: PAGE_W, h: BLANK_H, tpl, tv: tpl ? 1 : undefined, priv: last.priv || undefined,
+      del: false, dv: old ? old.dv + 1 : 0,
+    };
+    this.local({ t: "b.page", page });
   }
 
   private ensureAPage(): Page {
@@ -265,6 +324,7 @@ export class Board {
     const [p] = this.insertPages([{ w: cur.w, h: cur.h, bg: cur.bg, tpl: cur.tpl, tv: cur.tpl ? 1 : undefined, priv: cur.priv }]);
     const copies = this.strokes(cur.id).map((s) => this.cloneStroke(s, p.id, 0, 0));
     for (const s of copies) this.local({ t: "b.stroke", s });
+    this.ensureTrailingPage(p.id);
     this.go(p.id);
   }
 
@@ -295,6 +355,26 @@ export class Board {
     this.local({ t: "b.lock", on, ts: Math.max(Date.now(), this.state.lock.ts + 1) });
   }
 
+  /** Whether the student's view follows the teacher's scrolling and zoom (on by default). */
+  get followOn(): boolean {
+    return this.state.follow?.on ?? true;
+  }
+
+  setFollow(on: boolean) {
+    this.local({ t: "b.follow", on, ts: Math.max(Date.now(), (this.state.follow?.ts ?? 0) + 1) });
+  }
+
+  /** Teacher's devices: tell everyone (or one peer) what part of the board is on screen. */
+  sendView(v: ViewMsg, peerId?: string) {
+    if (!this.isStaff || !this.followOn || !this.state.pages[v.page]) return;
+    const priv = isPrivate(this.state, v.page);
+    const msg = { t: "b.view", page: v.page, cx: v.cx, cy: v.cy, w: v.w, h: v.h };
+    if (peerId) {
+      if (priv && this.net.peerIsStudent(peerId)) return;
+      void this.net.sendTo(peerId, msg);
+    } else this.net.broadcastLive(msg, priv);
+  }
+
   /** Streams an in-progress stroke. `replace` sends the whole point list (used for shapes). */
   sendLive(ls: Omit<LiveStroke, "at" | "author" | "pts">, pts: Pt[], replace = false, offset?: number) {
     this.net.broadcastLive({ t: "b.live", ...ls, pts, rep: replace, o: offset }, isPrivate(this.state, ls.page));
@@ -313,6 +393,7 @@ export class Board {
     const stroke = this.makeStroke(s);
     this.local({ t: "b.stroke", s: stroke });
     this.pushUndo({ kind: "add", ids: [stroke.id] });
+    this.ensureTrailingPage(stroke.page);
   }
 
   /** Adds several strokes as one undo step (axes, paste). */
@@ -324,6 +405,7 @@ export class Board {
       ids.push(st.id);
     }
     if (ids.length) this.pushUndo({ kind: "add", ids });
+    if (list.length) this.ensureTrailingPage(list[0].page);
     return ids;
   }
 
@@ -457,6 +539,7 @@ export class Board {
     const copies = this.clip.map((s) => this.cloneStroke(s, page, off, off));
     for (const s of copies) this.local({ t: "b.stroke", s });
     this.pushUndo({ kind: "add", ids: copies.map((s) => s.id) });
+    this.ensureTrailingPage(page);
     return copies.map((s) => s.id);
   }
 
@@ -494,8 +577,8 @@ export class Board {
   }
 
   // ---------- pointer ----------
-  laser(x: number, y: number, dot: boolean) {
-    const msg = { t: "b.laser", page: this.currentPage.id, x, y, dot };
+  laser(x: number, y: number, dot: boolean, page = this.currentPage.id) {
+    const msg = { t: "b.laser", page, x, y, dot };
     this.addLaser(this.me, msg.page, x, y, dot);
     this.net.broadcastLive(msg, isPrivate(this.state, msg.page));
   }
@@ -633,7 +716,7 @@ export class Board {
     for (const p of Object.values(this.state.pages)) if (visible(p.id)) pages[p.id] = p;
     const current = visible(this.state.current.page) ? this.state.current : { page: "", ts: -1 };
     const lesson = this.state.lesson;
-    await this.net.sendTo(peerId, { t: "b.sync", state: { pages, strokes: {}, current, lock: this.state.lock, side: this.state.side ?? null, lesson } });
+    await this.net.sendTo(peerId, { t: "b.sync", state: { pages, strokes: {}, current, lock: this.state.lock, follow: this.state.follow, side: this.state.side ?? null, lesson } });
     let batch: Record<string, Stroke> = {};
     let size = 0;
     const flush = () => this.net.sendTo(peerId, { t: "b.sync", state: { pages: {}, strokes: batch, current: { page: "", ts: -1 }, lock: { on: false, ts: -1 }, lesson } });
@@ -723,6 +806,11 @@ export class Board {
       case "b.asset":
         void this.receiveChunk(msg);
         return;
+      case "b.view":
+        if (this.followOn && typeof msg.page === "string" && [msg.cx, msg.cy, msg.w, msg.h].every((n) => Number.isFinite(n)) && msg.w > 0 && msg.h > 0) {
+          this.onRemoteView({ page: msg.page, cx: msg.cx, cy: msg.cy, w: msg.w, h: msg.h });
+        }
+        return;
     }
     if (typeof msg.t === "string" && msg.t.startsWith("b.")) {
       if (msg.t === "b.sync" && !this.acceptLesson(msg.state?.lesson)) return;
@@ -736,6 +824,8 @@ export class Board {
         this.persist();
         this.notify(op);
         if (op.t === "b.page" || op.t === "b.sync" || op.t === "b.side") void this.checkAssets();
+        if (op.t === "b.stroke") this.ensureTrailingPage(op.s.page);
+        else if (op.t === "b.sync") this.ensureTrailingPage();
       }
     }
   }

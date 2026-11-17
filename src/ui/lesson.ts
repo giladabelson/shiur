@@ -181,6 +181,9 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       openLessons: role === "teacher" ? () => openLessonsDialog(roomId, roomName.replace(/^שיעור-?/, "") || "השיעור") : undefined,
       saveLessonNow: role === "teacher" ? () => void saveNow() : undefined,
     });
+    let lastLock = board.state.lock.on;
+    // The teacher's view (scroll / zoom) arrives: show the same part of the board.
+    board.onRemoteView = (v) => view.applyRemoteView(v);
     board.onChange = (what, strokeId) => {
       view.invalidate(what, strokeId);
       if (what !== "live" && what !== "stroke") {
@@ -189,14 +192,25 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       }
       if (what === "lock") {
         updateLockBanner();
-        if (role === "student") toast(board.state.lock.on ? "אפשר רק להצביע עם העכבר" : "המורה אישר: אפשר לכתוב על הלוח");
+        // "lock" also reports the follow-the-teacher switch: only announce real lock changes.
+        if (role === "student" && board.state.lock.on !== lastLock) toast(board.state.lock.on ? "אפשר רק להצביע עם העכבר" : "המורה אישר: אפשר לכתוב על הלוח");
+        lastLock = board.state.lock.on;
       }
       if (what === "lesson") {
         updateLockBanner();
         toast(role === "teacher" ? "התחיל שיעור חדש. הלוח הקודם נשמר." : "המורה התחיל שיעור חדש");
       }
     };
-    await board.load();
+    // Started from the home screen (?fresh=1): a board idle for a while becomes a new lesson.
+    // The flag is removed from the address right away, so reloading mid-lesson keeps the board.
+    const fresh = role === "teacher" && new URLSearchParams(location.search).get("fresh") === "1";
+    await board.load(Date.now(), { fresh });
+    lastLock = board.state.lock.on;
+    if (new URLSearchParams(location.search).has("fresh")) {
+      const u = new URL(location.href);
+      u.searchParams.delete("fresh");
+      history.replaceState(history.state, "", u.pathname + u.search + u.hash);
+    }
     if (role === "teacher") void tidyLessons(roomId, roomName, board.lesson.id).catch((e) => console.warn("tidy", e));
 
     const started = Date.now();
@@ -500,7 +514,13 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
 
     room.onPeersChanged = updatePeers;
     room.onSignaling = updateStatus;
-    room.onPeerReady = (p) => void board.sendSnapshot(p.info.peerId);
+    room.onPeerReady = (p) => void (async () => {
+      await board.sendSnapshot(p.info.peerId);
+      // Someone (re)joined: show them what the teacher is looking at. The computer does this;
+      // the iPad only when the computer isn't in the lesson.
+      const teacherHere = [...room.peers.values()].some((q) => q.info.role === "teacher");
+      if (role === "teacher" || (role === "ipad" && !teacherHere)) view.sendViewNow(p.info.peerId);
+    })();
     room.onData = (p, msg) => {
       if (msg.t === "chat") addChat(msg, false);
       else if (typeof msg.t === "string" && msg.t.startsWith("b.")) board.handleRemote(p.info.peerId, msg);
