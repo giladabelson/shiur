@@ -6,6 +6,7 @@
 // the cloud upload / list / download is checked as well.
 import { chromium } from "playwright";
 import fs from "node:fs";
+import { admitInto } from "./lib/admit.mjs";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8787";
 const OUT = process.argv[3] || "./shots-lesson";
@@ -26,6 +27,8 @@ const browser = await chromium.launch({
   args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"],
 });
 
+// The teacher's page: it lets students in from the waiting room.
+let staff = null;
 async function join(role, name, vp, extra = {}) {
   const ctx = await browser.newContext({ permissions: ["camera", "microphone", "clipboard-read", "clipboard-write"], viewport: vp, ...extra });
   const page = await ctx.newPage();
@@ -36,6 +39,8 @@ async function join(role, name, vp, extra = {}) {
   await sleep(300);
   await page.click(".prejoin .btn.big");
   await page.waitForSelector(".lesson");
+  if (role === "teacher") staff ??= page;
+  if (role === "student") await admitInto(staff, page, name);
   return page;
 }
 

@@ -3,6 +3,7 @@
 // Saves screenshots at each step. Usage: node tests/user-session.mjs [baseUrl] [outDir] [pdfPath]
 import { chromium } from "playwright";
 import fs from "node:fs";
+import { admitInto } from "./lib/admit.mjs";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8787";
 const OUT = process.argv[3] || "./shots";
@@ -114,6 +115,7 @@ try {
   await sleep(600);
   await S.page.click(".prejoin .btn.big");
   await S.page.waitForSelector(".lesson");
+  await admitInto(T.page, S.page, "יואב");
   check("everyone connected", await until(async () => (await connected(S.page)) === 2 && (await connected(T.page)) === 2));
   check("student hears teacher (audio track)", await until(() => S.page.evaluate(() => [...window.__room.peers.values()].some((p) => p.info.role === "teacher" && p.link.remoteTracks().mic))));
   check("iPad not shown as a video tile for student", await S.page.evaluate(() => document.querySelectorAll(".tile:not(.self):not([hidden])").length === 1));
@@ -225,6 +227,7 @@ try {
   await P.page.fill(".prejoin input[type=text]", "יואב-טלפון");
   await sleep(500);
   await P.page.click(".prejoin .btn.big");
+  await admitInto(T.page, P.page, "יואב-טלפון");
   check("phone connected to all 3", await until(async () => (await connected(P.page)) === 3, 20000));
   await sleep(1500);
   await P.shot("13-phone");

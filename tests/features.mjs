@@ -2,6 +2,7 @@
 // Usage: node tests/features.mjs [baseUrl] [outDir]
 import { chromium } from "playwright";
 import fs from "node:fs";
+import { admitInto } from "./lib/admit.mjs";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8787";
 const OUT = process.argv[3] || "./shots-features";
@@ -20,6 +21,8 @@ const browser = await chromium.launch({
   executablePath: process.env.CHROME_PATH || "/opt/pw-browsers/chromium",
   args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"],
 });
+// The teacher's page: it lets students in from the waiting room.
+let staff = null;
 async function join(role, name, vp) {
   const ctx = await browser.newContext({ permissions: ["camera", "microphone"], viewport: vp, hasTouch: role === "ipad" });
   const page = await ctx.newPage();
@@ -30,6 +33,8 @@ async function join(role, name, vp) {
   await sleep(400);
   await page.click(".prejoin .btn.big");
   await page.waitForSelector(".lesson");
+  if (role === "teacher") staff ??= page;
+  if (role === "student") await admitInto(staff, page, name);
   return page;
 }
 const cdps = new Map();

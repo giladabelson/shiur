@@ -9,8 +9,20 @@ export interface PeerInfo {
   name: string;
 }
 
+/** A student in the waiting room, as the teacher's devices see them. */
+export interface PendingInfo {
+  peerId: string;
+  name: string;
+  since: number;
+}
+
 export type SignalMsg =
   | { type: "welcome"; you: PeerInfo; peers: PeerInfo[] }
+  // waiting room: to a student who isn't let in yet / to the teacher's devices / to a turned-away student
+  | { type: "waiting"; teacherHere: boolean }
+  | { type: "pending"; list: PendingInfo[] }
+  | { type: "admit-failed"; peerId: string; reason: string }
+  | { type: "denied" }
   | { type: "peer-joined"; peer: PeerInfo }
   | { type: "peer-left"; peerId: string; sessionId: string }
   | { type: "signal"; from: string; fromSession: string; fromRole: Role; fromName: string; data: any };
@@ -49,6 +61,7 @@ export class Signaling {
     window.removeEventListener("online", this.onOnline);
     this.ws?.close(1000, "bye");
     this.ws = null;
+    this.setState("closed");
   }
 
   send(msg: object) {
@@ -117,7 +130,8 @@ export class Signaling {
     ws.onclose = (e) => {
       if (this.ws !== ws) return;
       this.setState("closed");
-      if (this.stopped || e.code === 4001) return; // 4001: replaced by a newer tab of this device
+      // 4001: replaced by a newer tab of this device. 4003: the teacher didn't let us in.
+      if (this.stopped || e.code === 4001 || e.code === 4003) return;
       this.reconnectTimer = window.setTimeout(() => this.connect(), this.backoff);
       this.backoff = Math.min(this.backoff * 2, 8000);
     };

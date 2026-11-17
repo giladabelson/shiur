@@ -1,7 +1,7 @@
 // Teacher home: a permanent lesson link per student, plus the iPad link (with QR code).
 
-import QRCode from "qrcode";
-import { h, icon, toast, clear } from "./dom";
+import { h, icon, clear } from "./dom";
+import { copy, ipadQrDialog } from "./invite";
 import { openLessonsDialog } from "./lessons-dialog";
 import { askPhone } from "./phone-dialog";
 import { inviteText, loadStudents, openWhatsApp, roomUrl, saveStudents, waNumber, type Student } from "./students";
@@ -13,34 +13,6 @@ export function newRoomId(): string {
   crypto.getRandomValues(a);
   const abc = "abcdefghijkmnpqrstuvwxyz23456789";
   return Array.from(a, (b) => abc[b % abc.length]).join("");
-}
-
-async function copy(text: string) {
-  try {
-    await navigator.clipboard.writeText(text);
-    toast("הקישור הועתק");
-  } catch {
-    prompt("העתק את הקישור:", text);
-  }
-}
-
-function qrDialog(room: string, title: string) {
-  const url = roomUrl(room, "ipad");
-  const canvas = h("canvas", { class: "qr" });
-  void QRCode.toCanvas(canvas, url, { width: 260, margin: 1 });
-  const dlg = h("dialog", { class: "dlg" },
-    h("h2", null, `חיבור האייפד: ${title}`),
-    h("p", null, "סרוק עם המצלמה של האייפד, או פתח בו את הקישור ב-Safari:"),
-    canvas,
-    h("div", { class: "linkbox" }, h("code", null, url)),
-    h("div", { class: "row" },
-      h("button", { class: "btn", onclick: () => copy(url) }, "העתק קישור"),
-      h("button", { class: "btn ghost", onclick: () => dlg.close() }, "סגור"),
-    ),
-  );
-  dlg.addEventListener("close", () => dlg.remove());
-  document.body.append(dlg);
-  dlg.showModal();
 }
 
 /** Hand-drawn physics doodles in the notebook's margin (decoration only). */
@@ -118,7 +90,7 @@ export function renderHome(root: HTMLElement) {
           },
         }, icon("wa", 18), " לינק בוואטסאפ"),
         h("button", { class: "btn ghost", type: "button", onclick: () => copy(roomUrl(s.room)) }, icon("copy", 18), " לינק לתלמיד"),
-        h("button", { class: "btn ghost", type: "button", onclick: () => qrDialog(s.room, s.name) }, icon("ipad", 18), " חבר אייפד"),
+        h("button", { class: "btn ghost", type: "button", onclick: () => ipadQrDialog(s.room, s.name) }, icon("ipad", 18), " חבר אייפד"),
         h("button", { class: "btn ghost", type: "button", onclick: () => openLessonsDialog(s.room, s.name) }, icon("history", 18), " שיעורים קודמים"),
       ),
     );

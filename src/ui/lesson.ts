@@ -3,8 +3,8 @@
 import { Board } from "../board/board";
 import { BoardView } from "../board/view";
 import { LocalMedia, listDevices, savePrefs, canShareScreen } from "../rtc/media";
-import { Room, type Peer } from "../rtc/room";
-import type { Role } from "../rtc/signaling";
+import { Room, type Peer, type LobbyState } from "../rtc/room";
+import type { PendingInfo, Role } from "../rtc/signaling";
 import { buildToolbar } from "./toolbar";
 import { buildSidePanel, type SidePanel } from "./sidepanel";
 import { saveLessonPdf, tidyLessons } from "./lessons";
@@ -14,6 +14,7 @@ import { downloadBlob } from "../board/export";
 import { h, icon, iconBtn, toast, clear, fmtDuration } from "./dom";
 import { askPhone } from "./phone-dialog";
 import { inviteText, openWhatsApp, studentByRoom } from "./students";
+import { inviteDialog } from "./invite";
 
 const ROLE_TITLE: Record<Role, string> = { teacher: "מורה", student: "תלמיד", ipad: "אייפד" };
 
@@ -214,7 +215,7 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
     }
     if (role === "teacher") void tidyLessons(roomId, roomName, board.lesson.id).catch((e) => console.warn("tidy", e));
 
-    const started = Date.now();
+    let started = Date.now();
     const timerEl = h("span", { class: "timer", title: "זמן השיעור" }, "00:00");
     const netEl = h("span", { class: "net" });
     const lockBanner = h("div", { class: "lockbanner", hidden: true }, icon("laser", 16), " אפשר להצביע עם העכבר. כדי לכתוב, המורה צריך לאשר");
@@ -382,9 +383,16 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
     );
     if (role === "ipad") tiles.hidden = true;
 
+    // Teacher: the student's link (copy / WhatsApp / QR) and the iPad's QR, any time during the lesson.
+    const inviteBtn = role === "teacher"
+      ? h("button", {
+        class: "btn ghost small-btn invite-btn", type: "button", title: "לינק לתלמיד וקוד QR לאייפד",
+        onclick: () => inviteDialog(roomId, roomName.replace(/^שיעור-?/, "")),
+      }, icon("share", 16), " הזמנה")
+      : null;
     const topbar = h("header", { class: "topbar" },
       h("strong", null, role === "student" ? "שיעור" : `שיעור · ${ROLE_TITLE[role]}`),
-      timerEl, netEl,
+      timerEl, netEl, inviteBtn,
     );
     const statusText = h("span");
     // Teacher waiting for the student: open the student's WhatsApp chat with the lesson link.
@@ -402,13 +410,18 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
     const statusBanner = h("div", { class: "status-banner", hidden: true }, statusText, waInvite);
     const unlockAudio = h("button", { class: "btn audio-unlock", hidden: true, onclick: () => playAll() }, icon("speaker", 18), " לחץ כאן כדי לשמוע");
 
+    // waiting room: the student waits here until the teacher lets them in; the teacher's devices
+    // get a notice with "let in" / "turn away" for everyone waiting.
+    const waiting = role === "student" ? waitingScreen(name, media) : null;
+    const lobby = role !== "student" ? lobbyNotice((id) => room.admit(id), (id) => room.deny(id)) : null;
+
     clear(root);
     document.documentElement.classList.add("in-lesson");
     root.append(h("div", { class: `lesson role-${role}` },
       topbar, statusBanner,
       h("div", { class: "lesson-body" }, stage, side?.el ?? null, tiles, chatPanel),
-      controls, audioBox, unlockAudio,
-    ));
+      controls, audioBox, unlockAudio, lobby?.el ?? null,
+    ), ...(waiting ? [waiting.el] : []));
     tiles.append(selfTile);
 
     // ---------- peers ----------
@@ -505,16 +518,30 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       let text = "";
       if (room.signalingState !== "open" && connected.length === 0) text = "מתחבר לשרת…";
       else if (peers.some((p) => p.link.state !== "connected" && p.link.state !== "new")) text = "החיבור נחלש, מתחבר מחדש…";
+      else if (role !== "student" && room.pending.length) text = ""; // the waiting-room notice says it
       else if (role === "teacher" && !peers.some((p) => p.info.role === "student")) text = "מחכים שהתלמיד יצטרף…";
       else if (peers.length === 0) text = role === "student" ? "מחכים למורה…" : "מחכים שהמחשב של המורה יתחבר…";
       statusText.textContent = text;
       statusBanner.hidden = !text;
-      waInvite.hidden = !(role === "teacher" && peers.filter((p) => p.info.role === "student").length === 0 && room.signalingState === "open" && !!studentByRoom(roomId));
+      waInvite.hidden = !(role === "teacher" && !room.pending.length && peers.filter((p) => p.info.role === "student").length === 0 && room.signalingState === "open" && !!studentByRoom(roomId));
       netEl.textContent = others.length ? `${others.length + 1} בשיעור` : "";
     };
 
     room.onPeersChanged = updatePeers;
     room.onSignaling = updateStatus;
+    room.onLobby = (st) => {
+      waiting?.show(st);
+      if (st.kind === "admitted" && role === "student") {
+        started = Date.now(); // the lesson starts when the teacher lets the student in
+        playAll();
+      }
+      if (st.kind === "denied") media.stopAll();
+    };
+    room.onPending = (list) => {
+      lobby?.update(list);
+      updateStatus();
+    };
+    room.onAdmitFailed = () => toast("השיעור מלא, אי אפשר להכניס עוד משתתף");
     room.onPeerReady = (p) => void (async () => {
       await board.sendSnapshot(p.info.peerId);
       // Someone (re)joined: show them what the teacher is looking at. The computer does this;
@@ -637,6 +664,115 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       )));
     }
   }
+}
+
+/** Student: the screen shown until the teacher lets them in (or turns them away). */
+function waitingScreen(name: string, media: LocalMedia) {
+  const title = h("h1", null, "מתחבר לשיעור…");
+  const status = h("p", { class: "wait-status" });
+  const self = h("video", { class: "wait-self mirror", autoplay: true, playsInline: true, muted: true });
+  const selfWrap = h("div", { class: "wait-self-wrap" }, self);
+  const anim = h("div", { class: "wait-anim", "aria-hidden": "true" });
+  anim.innerHTML = `
+  <svg viewBox="0 0 160 70" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" direction="ltr">
+    <path class="wait-ink" d="M10 48 C 26 18, 40 18, 52 48 S 78 76, 92 46 S 118 16, 132 44"/>
+    <g class="wait-pencil"><path d="M0 0 L8 -22 L16 -18 L6 3 Z" fill="#ffe27a"/><path d="M0 0 L6 3 L1 6 Z" fill="currentColor"/></g>
+  </svg>
+  <div class="wait-dots"><span></span><span></span><span></span></div>`;
+  const retry = h("button", { class: "btn", type: "button", hidden: true, onclick: () => location.reload() }, "נסה שוב");
+  const card = h("div", { class: "card waiting-card" },
+    anim, title, h("p", { class: "wait-name hand" }, name), selfWrap, status, retry);
+  const el = h("div", { class: "waiting-room", role: "status", "aria-live": "polite" }, card);
+
+  const showSelf = () => {
+    self.srcObject = media.cam ? new MediaStream([media.cam]) : null;
+    selfWrap.hidden = !media.cam;
+  };
+  showSelf();
+  status.textContent = "";
+
+  return {
+    el,
+    show(st: LobbyState) {
+      el.classList.toggle("denied", st.kind === "denied");
+      if (st.kind === "admitted") {
+        el.hidden = true;
+        self.srcObject = null;
+        return;
+      }
+      el.hidden = false;
+      if (st.kind === "waiting") {
+        title.textContent = "ממתינים שהמורה יכניס אותך לשיעור…";
+        status.textContent = st.teacherHere ? "המורה כבר כאן ויכניס אותך עוד רגע." : "המורה עוד לא בשיעור";
+        el.classList.toggle("teacher-away", !st.teacherHere);
+        showSelf();
+      } else if (st.kind === "denied") {
+        title.textContent = "המורה לא אישר את הכניסה";
+        status.textContent = "אפשר לנסות שוב מאוחר יותר.";
+        anim.hidden = true;
+        selfWrap.hidden = true;
+        self.srcObject = null;
+        retry.hidden = false;
+      }
+    },
+  };
+}
+
+/** Teacher devices: who is waiting to come in, with "let in" and "turn away". */
+function lobbyNotice(admit: (peerId: string) => void, deny: (peerId: string) => void) {
+  const list = h("div", { class: "lobby-list" });
+  const el = h("section", { class: "lobby", hidden: true, role: "region", "aria-label": "ממתינים בכניסה" },
+    h("div", { class: "lobby-head hand" }, icon("dot", 14), " ממתינים בכניסה"), list);
+  let known = new Set<string>();
+  const baseTitle = document.title;
+
+  return {
+    el,
+    update(pending: PendingInfo[]) {
+      const fresh = pending.filter((p) => !known.has(p.peerId));
+      known = new Set(pending.map((p) => p.peerId));
+      list.replaceChildren(...pending.map((p) => {
+        const who = p.name || "תלמיד";
+        const btns: HTMLButtonElement[] = [];
+        const act = (fn: (id: string) => void) => () => { for (const b of btns) b.disabled = true; fn(p.peerId); };
+        btns.push(
+          h("button", { class: "btn admit", type: "button", onclick: act(admit) }, "הכנס"),
+          h("button", { class: "btn ghost danger deny", type: "button", onclick: act(deny) }, "דחה"),
+        );
+        return h("div", { class: `lobby-item${fresh.includes(p) ? " new" : ""}`, "data-peer": p.peerId, "data-name": who },
+          h("span", { class: "lobby-avatar", "aria-hidden": "true" }, who.slice(0, 1)),
+          h("span", { class: "lobby-text" }, h("strong", null, who), " מחכה להיכנס לשיעור"),
+          ...btns,
+        );
+      }));
+      el.hidden = pending.length === 0;
+      document.title = pending.length ? `(${pending.length}) ${baseTitle}` : baseTitle;
+      if (fresh.length) chime();
+    },
+  };
+}
+
+/** A soft two-note "ding" (someone is waiting to come in). */
+let chimeCtx: AudioContext | null = null;
+function chime() {
+  try {
+    chimeCtx ??= new AudioContext();
+    const ctx = chimeCtx;
+    void ctx.resume();
+    const t = ctx.currentTime;
+    for (const [f, at] of [[880, 0], [1318.5, 0.16]] as const) {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = "sine";
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0, t + at);
+      g.gain.linearRampToValueAtTime(0.12, t + at + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + at + 0.6);
+      o.connect(g).connect(ctx.destination);
+      o.start(t + at);
+      o.stop(t + at + 0.65);
+    }
+  } catch { /* no sound */ }
 }
 
 /** "שיעור-יואב": the student's name comes from the teacher's link (?n=) or from the student's own name. */

@@ -11,7 +11,8 @@ A browser-based private tutoring room: live video call plus a shared pen-friendl
 - Split view: a PDF or image pinned next to the board for teacher and student (synced), with its own scroll and zoom. The iPad stays a pure writing surface.
 - One board per lesson: a new lesson never overwrites the previous one, and each lesson is saved as a PDF at the end (see "Lesson PDFs").
 - Students start in pointer-only mode (a laser that appears only when they deliberately move the mouse); the teacher allows writing with one tap.
-- An iPad joins as a third device (pen input, no mic or speaker to avoid echo), connected by QR code.
+- An iPad joins as a third device (pen input, no mic or speaker to avoid echo), connected by QR code (from the home screen, or from "הזמנה" inside the lesson, which also has the student's link, QR and WhatsApp).
+- Waiting room: a student waits until the teacher (computer or iPad) lets them in or turns them away. It is enforced by the signaling server: nobody sees a waiting student and nothing is relayed to or from them. A browser that was let in goes straight back in after a reload for 12 hours. Roles still come from the link (`?role=teacher` / `?role=ipad`), so anyone who knows those links is not stopped by it.
 - Screen sharing, chat, lesson timer, connection quality indicator, device picker, optional background blur (MediaPipe, served locally).
 - A permanent link per student, sent to the student's WhatsApp in one tap (also the lesson PDFs). Students join from a link with nothing to install.
 - A bright notebook look: squared paper, a handwriting font for headings, and the board as a sheet on a desk.
@@ -86,6 +87,7 @@ npm run test:e2e                 # 30 checks: P2P call, board sync, lock, screen
 node tests/features.mjs          # 24 checks on whiteboard tools
 node tests/user-session.mjs      # "real user" walkthrough with stylus pressure, palm touches, pinch zoom and a PDF worksheet
 node tests/lesson-features.mjs   # scrolling, pointer-only students, live ink order, split view, lesson PDFs, WhatsApp, blur edges
+node tests/waiting-room.mjs      # waiting room (wait, admit, deny, reload, iPad admits) and the in-lesson invite dialog
 ```
 
 `npm run dev:cloud` starts a second local server (port 8788) with a simulated R2 bucket, so `node tests/lesson-features.mjs http://127.0.0.1:8788` also checks the cloud upload, list and download.
