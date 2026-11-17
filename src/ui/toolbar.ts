@@ -1,4 +1,6 @@
-// Whiteboard toolbar: one compact row; tapping a tool that has options opens a small menu under it.
+// Whiteboard toolbar, two rows:
+//  1. the tools (pen, highlighter, shapes, eraser, lasso, pointer) and the general controls;
+//  2. directly beneath, an always-visible strip with the options of the selected tool.
 
 import type { Board } from "../board/board";
 import { BoardView, renderPage, type ShapeKind, type ViewTool } from "../board/view";
@@ -10,6 +12,7 @@ import { openDesmos } from "./desmos";
 const COLORS = ["#1f2937", "#2563eb", "#dc2626", "#16a34a", "#ea580c", "#9333ea", "#0891b2", "#db2777", "#ca8a04", "#ffffff"];
 const HL_COLORS = ["#facc15", "#4ade80", "#60a5fa", "#f472b6", "#fb923c"];
 const SIZES = [2, 3.5, 6, 10];
+const SIZE_NAMES = ["דק", "בינוני", "עבה", "עבה מאוד"];
 const ERASER_KEY = "shiur.eraser";
 const ERASER_SIZES = [{ px: 10, label: "קטן" }, { px: 18, label: "בינוני" }, { px: 32, label: "גדול" }];
 const SHAPES: { id: ShapeKind; icon: string; label: string }[] = [
@@ -42,7 +45,14 @@ function loadFavs(): Fav[] {
   return DEFAULT_FAVS.map((f) => ({ ...f }));
 }
 
-// ---------- popover ----------
+// TODO(integration): BoardView is getting `lassoMode` and Board `followOn` / `setFollow`
+// from a parallel change. These narrow intersection types let the toolbar build before
+// that lands and keep type-checking after it; drop them once both are in place.
+type LassoMode = "free" | "rect";
+type LassoView = BoardView & { lassoMode?: LassoMode };
+type FollowBoard = Board & { followOn?: boolean; setFollow?: (on: boolean) => void };
+
+// ---------- popover (pages, files, zoom) ----------
 let openPop: { el: HTMLElement; anchor: HTMLElement } | null = null;
 function closePop() {
   openPop?.el.remove();
@@ -82,25 +92,38 @@ export interface ToolbarOpts {
   saveLessonNow?: () => void;
 }
 
-/** Tools a student may use while the teacher hasn't allowed writing. */
-const POINT_TOOLS: ViewTool[] = ["laser", "pan"];
+/** Tools a student may use while the teacher hasn't allowed writing (they scroll with wheel / finger). */
+const POINT_TOOLS: ViewTool[] = ["laser"];
+
+/** The tools that have a button in the first row (in order). */
+type BarTool = "pen" | "hl" | "shape" | "eraser" | "lasso" | "laser";
 
 export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
+  const lv = view as LassoView;
+  const fb = board as FollowBoard;
   const toolBtns = new Map<ViewTool, HTMLButtonElement>();
+  /** Re-sync the "on" state of every option button; filled by the option builders below. */
+  const syncs: (() => void)[] = [];
   const pageLabel = h("span", { class: "pagelbl" });
   const zoomBtn = h("button", { class: "zoomlbl", type: "button", title: "זום" });
   const lockBtn = iconBtn("lock", "התלמיד רק מצביע", () => {
     board.setLock(!board.state.lock.on);
     toast(board.state.lock.on ? "התלמיד יכול רק להצביע עם העכבר" : "התלמיד יכול עכשיו לכתוב על הלוח");
   });
-  const styleBtn = h("button", { class: "ibtn stylebtn", type: "button", title: "צבע ועובי", "aria-label": "צבע ועובי" }, h("span", { class: "dot" }));
+  const followBtn = h("button", { class: "followbtn", type: "button" }, icon("eye", 18), h("span", null, "התלמיד עוקב אחרי הזום שלי"));
+  followBtn.addEventListener("click", () => {
+    const on = !(fb.followOn ?? true);
+    fb.setFollow?.(on);
+    toast(on ? "התלמיד רואה את הלוח בדיוק כמוך (זום ומיקום)" : "התלמיד מזיז ומגדיל את הלוח בעצמו");
+    refresh();
+  });
   const fileInput = h("input", { type: "file", accept: "application/pdf,image/*", hidden: true }) as HTMLInputElement;
   let favs = loadFavs();
   try {
     const px = Number(localStorage.getItem(ERASER_KEY));
     if (ERASER_SIZES.some((z) => z.px === px)) view.eraserPx = px;
   } catch { /* ignore */ }
-  const favBtns: HTMLButtonElement[] = [];
+  if (lv.lassoMode !== "rect") lv.lassoMode = "free";
 
   fileInput.addEventListener("change", async () => {
     const f = fileInput.files?.[0];
@@ -111,94 +134,85 @@ export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
     try { await board.importFile(f); } catch (e) { console.error(e); toast("לא הצלחתי לפתוח את הקובץ"); }
   });
 
+  // ---------- second row: one options panel per tool ----------
+  const panels = new Map<BarTool, HTMLElement>();
+  const optsRow = h("div", { class: "tb-opts", role: "group", "aria-label": "אפשרויות הכלי" });
+
   const refreshTools = () => {
-    for (const [id, b] of toolBtns) b.classList.toggle("on", id === view.tool);
+    for (const [id, b] of toolBtns) {
+      b.classList.toggle("on", id === view.tool);
+      b.setAttribute("aria-pressed", String(id === view.tool));
+    }
     const shapeBtn = toolBtns.get("shape");
-    if (shapeBtn) shapeBtn.replaceChildren(icon(SHAPES.find((s) => s.id === view.shape)?.icon ?? "line"), h("span", { class: "caret" }));
-    const dot = styleBtn.firstElementChild as HTMLElement;
-    dot.style.background = view.color;
-    const px = Math.min(18, 4 + view.size * 1.4);
-    dot.style.width = dot.style.height = `${px}px`;
-    styleBtn.classList.toggle("dashed", view.dash);
-    favBtns.forEach((b, i) => {
-      const f = favs[i];
-      b.classList.toggle("on", (view.tool === "pen" || view.tool === "hl") && view.tool === f.tool && view.color === f.color && view.size === f.size && view.dash === f.dash);
-    });
+    const shapeIc = shapeBtn?.querySelector(".tbtn-ic");
+    if (shapeIc) shapeIc.replaceChildren(icon(SHAPES.find((s) => s.id === view.shape)?.icon ?? "line"));
+    for (const [id, p] of panels) p.hidden = id !== view.tool;
+    for (const s of syncs) s();
   };
 
-  /** Student without permission to write: only the pointer (and moving the page). */
+  /** Student without permission to write: only the pointer. */
   const pointOnly = () => !opts.isStaff && board.state.lock.on;
   const setTool = (t: ViewTool) => {
     if (pointOnly() && !POINT_TOOLS.includes(t)) t = "laser";
     view.tool = t;
     if (t !== "lasso") view.clearSelection();
     if (t === "hl" && !HL_COLORS.includes(view.color)) view.color = HL_COLORS[0];
-    if ((t === "pen" || t === "fade" || t === "shape") && HL_COLORS.includes(view.color)) view.color = COLORS[0];
+    if ((t === "pen" || t === "shape") && HL_COLORS.includes(view.color)) view.color = COLORS[0];
     refreshTools();
+    optsRow.scrollLeft = 0;
   };
   view.onViewChange = () => refresh();
 
-  const toolBtn = (id: ViewTool, ic: string, lbl: string, menu?: () => HTMLElement) => {
-    const b = iconBtn(ic, lbl, () => {
-      if (menu && view.tool === id) return popover(b, menu);
-      closePop();
-      setTool(id);
+  /** A toggle-style button in the options row. `on` is re-read on every refresh. */
+  const opt = (text: string | null, on: () => boolean, onclick: () => void, ic?: string, title?: string, extra = "") => {
+    const b = h("button", { class: `optbtn ${extra} ${text ? "" : "icononly"}`, type: "button", title: title ?? text ?? "", "aria-label": title ?? text ?? "" },
+      ic ? icon(ic, 18) : null, text ? h("span", null, text) : null);
+    b.addEventListener("click", () => { onclick(); refreshTools(); });
+    syncs.push(() => {
+      const v = on();
+      b.classList.toggle("on", v);
+      b.setAttribute("aria-pressed", String(v));
     });
-    if (menu) b.append(h("span", { class: "caret" }));
-    toolBtns.set(id, b);
     return b;
   };
+  const group = (...c: (Node | null)[]) => h("div", { class: "ogroup" }, ...c);
+  const glabel = (t: string) => h("span", { class: "olabel" }, t);
 
-  const shapeMenu = () => h("div", null,
-    label("צורה"),
-    row(...SHAPES.map((s) => {
-      const b = iconBtn(s.icon, s.label, () => { view.shape = s.id; setTool("shape"); closePop(); });
-      b.classList.toggle("on", view.shape === s.id);
+  const swatches = (palette: string[], withCustom: boolean) => {
+    const out: Node[] = palette.map((c) => {
+      const b = h("button", { class: "oswatch", type: "button", title: "צבע", "aria-label": `צבע ${c}` }, h("span", { style: { background: c } }));
+      b.addEventListener("click", () => { view.color = c; refreshTools(); });
+      syncs.push(() => b.classList.toggle("on", view.color === c));
       return b;
-    })),
-    choice("קו מקווקו", view.dash, () => { view.dash = !view.dash; refreshTools(); closePop(); }, "dash"),
-    choice("הוסף צירי x / y", false, () => { closePop(); view.insertAxes(); }, "axes"),
-  );
-  const eraserMenu = () => h("div", null,
-    label("מחק"),
-    choice("מוחק קו שלם", view.eraserMode === "stroke", () => { view.eraserMode = "stroke"; closePop(); }),
-    choice("מחק חלקי (רק איפה שעוברים)", view.eraserMode === "partial", () => { view.eraserMode = "partial"; closePop(); }),
-    label("גודל המחק"),
-    ...ERASER_SIZES.map((z) => choice(z.label, view.eraserPx === z.px, () => {
-      view.eraserPx = z.px;
-      try { localStorage.setItem(ERASER_KEY, String(z.px)); } catch { /* ignore */ }
-      closePop();
-    })),
-  );
-  const laserMenu = () => h("div", null,
-    label("לייזר"),
-    choice("עם שובל", !view.laserDot, () => { view.laserDot = false; closePop(); }),
-    choice("נקודה בלבד", view.laserDot, () => { view.laserDot = true; closePop(); }),
-  );
-  const penMenu = () => h("div", null,
-    label("עט"),
-    choice("זיהוי צורות (ציור + החזקה)", view.autoShape, () => { view.autoShape = !view.autoShape; closePop(); }),
-    choice("קו מקווקו", view.dash, () => { view.dash = !view.dash; refreshTools(); closePop(); }, "dash"),
-  );
-
-  const styleMenu = () => {
-    const palette = view.tool === "hl" ? HL_COLORS : COLORS;
-    const custom = h("input", { type: "color", class: "swatch custom", title: "צבע אחר", value: view.color.length === 7 ? view.color : "#000000" }) as HTMLInputElement;
-    custom.addEventListener("change", () => { view.color = custom.value; refreshTools(); });
-    return h("div", null,
-      label("צבע"),
-      h("div", { class: "pop-grid" }, ...palette.map((c) =>
-        h("button", { class: `swatch ${view.color === c ? "on" : ""}`, type: "button", title: "צבע", style: { background: c }, onclick: () => { view.color = c; refreshTools(); closePop(); } })), custom),
-      label("עובי"),
-      row(...SIZES.map((s, i) =>
-        h("button", { class: `sizebtn ${view.size === s ? "on" : ""}`, type: "button", title: ["דק", "בינוני", "עבה", "עבה מאוד"][i], onclick: () => { view.size = s; refreshTools(); closePop(); } },
-          h("span", { style: { width: `${3 + s * 1.3}px`, height: `${3 + s * 1.3}px` } })))),
-      view.tool === "pen" || view.tool === "shape" ? choice("קו מקווקו", view.dash, () => { view.dash = !view.dash; refreshTools(); closePop(); }, "dash") : null,
-    );
+    });
+    if (withCustom) {
+      const custom = h("input", { type: "color", class: "swatch custom", title: "צבע אחר", "aria-label": "צבע אחר", value: "#000000" }) as HTMLInputElement;
+      custom.addEventListener("input", () => { view.color = custom.value; refreshTools(); });
+      const wrap = h("label", { class: "oswatch customwrap", title: "צבע אחר" }, custom);
+      syncs.push(() => {
+        const isCustom = !palette.includes(view.color) && !HL_COLORS.includes(view.color);
+        wrap.classList.toggle("on", isCustom);
+        if (isCustom && view.color.length === 7 && document.activeElement !== custom) custom.value = view.color;
+      });
+      out.push(wrap);
+    }
+    return group(...out);
   };
-  styleBtn.addEventListener("click", () => popover(styleBtn, styleMenu));
+  const sizes = () => group(...SIZES.map((s, i) => {
+    const d = 3 + s * 1.3;
+    const b = h("button", { class: "osize", type: "button", title: SIZE_NAMES[i], "aria-label": `עובי ${SIZE_NAMES[i]}` },
+      h("span", { style: { width: `${d}px`, height: `${d}px` } }));
+    b.addEventListener("click", () => { view.size = s; refreshTools(); });
+    syncs.push(() => {
+      b.classList.toggle("on", view.size === s);
+      (b.firstElementChild as HTMLElement).style.background = view.color === "#ffffff" ? "#9aa3b5" : view.color;
+    });
+    return b;
+  }));
+  const dashed = () => opt("מקווקו", () => view.dash, () => { view.dash = !view.dash; }, "dash", "קו מקווקו");
 
   // favourites: tap to use, long-press (or right-click) to save the current pen into the slot
+  const favBtns: HTMLButtonElement[] = [];
   for (let i = 0; i < 3; i++) {
     const b = h("button", { class: "ibtn fav", type: "button", title: "עט מועדף (לחיצה ארוכה: שמור את העט הנוכחי)", "aria-label": `עט מועדף ${i + 1}` });
     const draw = () => {
@@ -211,7 +225,7 @@ export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
       saved = true;
       const tool = view.tool === "hl" ? "hl" : "pen";
       favs[i] = { tool, color: view.color, size: view.size, dash: view.dash };
-      localStorage.setItem(FAV_KEY, JSON.stringify(favs));
+      try { localStorage.setItem(FAV_KEY, JSON.stringify(favs)); } catch { /* ignore */ }
       draw();
       refreshTools();
       toast("העט נשמר במועדפים");
@@ -227,9 +241,66 @@ export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
       view.dash = f.dash;
       setTool(f.tool);
     });
+    syncs.push(() => {
+      const f = favs[i];
+      b.classList.toggle("on", view.tool === f.tool && view.color === f.color && view.size === f.size && view.dash === f.dash);
+    });
     draw();
     favBtns.push(b);
   }
+
+  panels.set("pen", h("div", { class: "opanel" },
+    group(glabel("מועדפים"), ...favBtns),
+    swatches(COLORS, true),
+    sizes(),
+    group(dashed(), opt("זיהוי צורות", () => view.autoShape, () => { view.autoShape = !view.autoShape; }, "tri", "זיהוי צורות: מציירים צורה ומחזיקים רגע, והיא מתיישרת")),
+  ));
+  panels.set("hl", h("div", { class: "opanel" },
+    swatches(HL_COLORS, false),
+    sizes(),
+  ));
+  panels.set("shape", h("div", { class: "opanel shapes" },
+    group(...SHAPES.map((s) => opt(null, () => view.shape === s.id, () => { view.shape = s.id; setTool("shape"); }, s.icon, s.label, "shapebtn"))),
+    swatches(COLORS, true),
+    sizes(),
+    group(dashed(), opt("צירי x / y", () => false, () => view.insertAxes(), "axes", "הוסף צירי x / y לעמוד")),
+  ));
+  panels.set("eraser", h("div", { class: "opanel" },
+    group(glabel("גודל"), ...ERASER_SIZES.map((z, i) => {
+      const d = [10, 16, 24][i];
+      return opt(z.label, () => view.eraserPx === z.px, () => {
+        view.eraserPx = z.px;
+        try { localStorage.setItem(ERASER_KEY, String(z.px)); } catch { /* ignore */ }
+      }, undefined, `מחק ${z.label}`, `erasersz sz${d}`);
+    })),
+    group(
+      opt("מוחק קו שלם", () => view.eraserMode === "stroke", () => { view.eraserMode = "stroke"; }),
+      opt("מחיקה חלקית", () => view.eraserMode === "partial", () => { view.eraserMode = "partial"; }, undefined, "מוחק רק איפה שעוברים"),
+    ),
+  ));
+  panels.set("lasso", h("div", { class: "opanel" },
+    group(
+      opt("סימון חופשי", () => lv.lassoMode !== "rect", () => { lv.lassoMode = "free"; }, "lasso", "סימון חופשי: מקיפים ביד את מה שרוצים לבחור"),
+      opt("מלבן", () => lv.lassoMode === "rect", () => { lv.lassoMode = "rect"; }, "rect", "סימון במלבן: גוררים מלבן סביב מה שרוצים לבחור"),
+    ),
+    h("span", { class: "ohint" }, "אחרי הסימון: להזיז, להגדיל, לצבוע, להעתיק או למחוק"),
+  ));
+  panels.set("laser", h("div", { class: "opanel" },
+    group(
+      opt("עם שובל", () => !view.laserDot, () => { view.laserDot = false; }, "laser"),
+      opt("נקודה בלבד", () => view.laserDot, () => { view.laserDot = true; }, "dot"),
+    ),
+  ));
+  for (const p of panels.values()) optsRow.append(p);
+
+  // ---------- first row ----------
+  const toolBtn = (id: BarTool, ic: string, text: string, title: string, extra = "", aria = title) => {
+    const b = h("button", { class: `tbtn ${extra}`, type: "button", title, "aria-label": aria },
+      h("span", { class: "tbtn-ic" }, icon(ic, 22)), h("span", { class: "tbtn-lbl" }, text));
+    b.addEventListener("click", () => { closePop(); setTool(id); });
+    toolBtns.set(id, b);
+    return b;
+  };
 
   const pageMenu = () => h("div", null,
     choice("עמוד חדש", false, () => { closePop(); board.addPage(); }, "plus"),
@@ -255,7 +326,7 @@ export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
     }, "image/png");
   };
   let exporting = false;
-  const pdfBtn = iconBtn("pdf", "ייצא את כל הלוח ל-PDF", () => void exportAll());
+  const pdfBtn = iconBtn("pdf", "ייצא את כל הלוח ל-PDF", () => void exportAll(), "pdfbtn");
   const exportAll = async () => {
     if (exporting) return;
     exporting = true;
@@ -305,18 +376,17 @@ export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
     iconBtn("trash", "מחק", () => view.deleteSelection()),
   ));
 
-  const bar = h("div", { class: "toolbar", role: "toolbar", "aria-label": "כלי הלוח" },
-    h("div", { class: "tgroup" },
-      toolBtn("pen", "pen", "עט (P)", penMenu),
-      toolBtn("hl", "hl", "מרקר (H)"),
-      toolBtn("fade", "fade", "דיו נעלם: נמחק לבד אחרי כמה שניות (F)"),
-      toolBtn("shape", "line", "צורות (S)", shapeMenu),
-      toolBtn("eraser", "eraser", "מחק (E)", eraserMenu),
-      toolBtn("lasso", "lasso", "לאסו: בחר, הזז, הגדל, צבע (V)"),
-      toolBtn("laser", "laser", "לייזר להצבעה (L)", laserMenu),
-      toolBtn("pan", "pan", "הזזת הדף"),
+  const row1 = h("div", { class: "tb-row" },
+    h("div", { class: "tgroup tools" },
+      toolBtn("pen", "pen", "עט", "עט (P)"),
+      toolBtn("hl", "hl", "מרקר", "מרקר (H)"),
+      toolBtn("shape", "line", "צורות", "צורות (S)"),
+      toolBtn("eraser", "eraser", "מחק", "מחק (E)"),
+      toolBtn("lasso", "lasso", "בחירה", "בחירה: סמן חלק מהלוח כדי להזיז, להגדיל או לצבוע (V)"),
     ),
-    h("div", { class: "tgroup" }, ...favBtns, styleBtn),
+    h("div", { class: "tgroup pointer-slot" },
+      toolBtn("laser", "laser", "פוינטר", "פוינטר להצבעה (L)", "pointer", "לייזר להצבעה (L)"),
+    ),
     h("div", { class: "tgroup" },
       iconBtn("undo", "בטל (Ctrl+Z)", () => board.undo()),
       iconBtn("redo", "בצע שוב (Ctrl+Y)", () => board.redo()),
@@ -328,9 +398,10 @@ export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
       pageMenuBtn,
     ),
     h("div", { class: "tgroup" }, fileMenuBtn, pdfBtn, zoomBtn),
-    opts.isTeacher ? h("div", { class: "tgroup" }, lockBtn) : null,
-    fileInput,
+    opts.isTeacher ? h("div", { class: "tgroup" }, followBtn, lockBtn) : null,
   );
+
+  const bar = h("div", { class: "toolbar", role: "toolbar", "aria-label": "כלי הלוח" }, row1, optsRow, fileInput);
 
   let wasLocked: boolean | null = null;
   function refresh() {
@@ -343,18 +414,27 @@ export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
     lockBtn.replaceChildren(icon(locked ? "lock" : "unlock"));
     lockBtn.title = locked ? "התלמיד רק מצביע עם העכבר. לחץ כדי לאפשר לו לכתוב" : "התלמיד יכול לכתוב. לחץ כדי שרק יצביע";
     lockBtn.setAttribute("aria-label", lockBtn.title);
-    // Student: drawing tools are greyed out until the teacher allows writing.
+    const following = fb.followOn ?? true;
+    followBtn.classList.toggle("on", following);
+    followBtn.setAttribute("aria-pressed", String(following));
+    followBtn.title = following
+      ? "התלמיד רואה את הלוח בדיוק כמוך (זום ומיקום). לחץ כדי שיזיז בעצמו"
+      : "התלמיד מזיז ומגדיל את הלוח בעצמו. לחץ כדי שיעקוב אחרי הזום שלך";
+    // Student: drawing tools (and their options) are greyed out until the teacher allows writing.
     if (!opts.isStaff) {
       for (const [id, b] of toolBtns) b.disabled = locked && !POINT_TOOLS.includes(id);
-      for (const b of favBtns) b.disabled = locked;
-      styleBtn.disabled = locked;
+      for (const [id, p] of panels) {
+        const off = locked && !POINT_TOOLS.includes(id);
+        p.classList.toggle("disabled", off);
+        p.querySelectorAll<HTMLButtonElement | HTMLInputElement>("button, input").forEach((el) => { el.disabled = off; });
+      }
       if (locked !== wasLocked) setTool(locked ? "laser" : "pen");
       wasLocked = locked;
     }
     refreshTools();
   }
 
-  const KEYS: Record<string, ViewTool> = { p: "pen", h: "hl", f: "fade", s: "shape", e: "eraser", v: "lasso", l: "laser" };
+  const KEYS: Record<string, ViewTool> = { p: "pen", h: "hl", s: "shape", e: "eraser", v: "lasso", l: "laser" };
   window.addEventListener("keydown", (e) => {
     const a = document.activeElement;
     if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA")) return;
