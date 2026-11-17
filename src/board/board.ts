@@ -52,11 +52,11 @@ export interface LaserPt {
   noTrail?: boolean;
 }
 
-/** Laser trail: each point stays this long, then fades out over LASER_FADE_MS. */
+/** Laser trail: stays this long after the last pointing (a mouse hover: after each point), then fades out over LASER_FADE_MS. */
 export const LASER_HOLD_MS = 1600;
 export const LASER_FADE_MS = 600;
 const LASER_DOT_MS = 1500;
-const LASER_MAX_PTS = 800;
+const LASER_MAX_PTS = 4000;
 /** A lasso drag preview (b.xf) for strokes that were committed (b.upd) this recently is stale. */
 const XF_STALE_MS = 1500;
 
@@ -666,6 +666,10 @@ export class Board {
       this.lasers.set(who, l);
     }
     l.head = { x: p.x, y: p.y, at: now, show: dot || !!p.hover };
+    // While the teacher keeps pointing (pressing, or the Pencil hovering between letters), the
+    // whole trail stays; it fades together only once the pointing stops. A hovering mouse
+    // (a student's pointer) has a short trail that fades point by point instead.
+    if (!p.hover || p.noTrail) for (const t of l.trail) t.at = now;
     if (!dot && !p.noTrail) {
       l.trail.push({ x: p.x, y: p.y, at: now, seg: p.seg });
       if (l.trail.length > LASER_MAX_PTS) l.trail.shift();

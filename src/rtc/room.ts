@@ -1,7 +1,7 @@
 // Room orchestration: signaling + one PeerLink per remote device (full mesh, at most a few devices).
 
 import { PeerLink } from "./peer";
-import { Signaling, type PeerInfo, type Role, type SignalMsg, type SignalingState } from "./signaling";
+import { Signaling, type PeerInfo, type PendingInfo, type Role, type SignalMsg, type SignalingState } from "./signaling";
 import type { LocalMedia } from "./media";
 
 export interface RemoteState {
@@ -28,6 +28,31 @@ export function deviceIds() {
   return { peerId, sessionId: crypto.randomUUID() };
 }
 
+/**
+ * This browser, stable across reloads and tabs (localStorage). The server remembers that the
+ * teacher let it in, so a reload or reconnect mid-lesson doesn't go back to the waiting room.
+ * (peerId is per tab and sessionId per page load, so neither can be used for that.)
+ */
+export function clientId(): string {
+  try {
+    let id = localStorage.getItem("shiur.clientId");
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem("shiur.clientId", id);
+    }
+    return id;
+  } catch {
+    return crypto.randomUUID();
+  }
+}
+
+/** Where a student stands in the waiting room. */
+export type LobbyState =
+  | { kind: "connecting" }
+  | { kind: "waiting"; teacherHere: boolean }
+  | { kind: "admitted" }
+  | { kind: "denied" };
+
 export class Room {
   readonly peerId: string;
   readonly sessionId: string;
@@ -46,6 +71,14 @@ export class Room {
   onData: (peer: Peer, msg: any, channel: "ops" | "live") => void = () => {};
   /** A peer's reliable channel just opened (send it snapshots here). */
   onPeerReady: (peer: Peer) => void = () => {};
+  /** Waiting room (students): waiting for the teacher, let in, or turned away. */
+  onLobby: (s: LobbyState) => void = () => {};
+  /** Waiting room (teacher devices): who is waiting to be let in. */
+  onPending: (list: PendingInfo[]) => void = () => {};
+  /** Teacher devices: a student couldn't be let in (the room is full). */
+  onAdmitFailed: (peerId: string) => void = () => {};
+  lobby: LobbyState = { kind: "connecting" };
+  pending: PendingInfo[] = [];
 
   constructor(
     readonly roomId: string,
@@ -58,7 +91,7 @@ export class Room {
     this.sessionId = ids.sessionId;
     this.forceRelay = new URLSearchParams(location.search).has("relay");
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const q = new URLSearchParams({ peerId: this.peerId, sessionId: this.sessionId, role, name });
+    const q = new URLSearchParams({ peerId: this.peerId, sessionId: this.sessionId, role, name, client: clientId() });
     this.sig = new Signaling(`${proto}//${location.host}/api/ws/${encodeURIComponent(roomId)}?${q}`);
     this.sig.onMessage = (m) => this.handleSignal(m);
     this.sig.onState = (s) => this.onSignaling(s);
@@ -84,6 +117,21 @@ export class Room {
 
   get signalingState() {
     return this.sig.state;
+  }
+
+  /** Teacher devices: let a waiting student into the lesson. */
+  admit(peerId: string) {
+    this.sig.send({ type: "admit", peerId });
+  }
+
+  /** Teacher devices: turn a waiting student away. */
+  deny(peerId: string) {
+    this.sig.send({ type: "deny", peerId });
+  }
+
+  private setLobby(s: LobbyState) {
+    this.lobby = s;
+    this.onLobby(s);
   }
 
   private onOnline = () => {
@@ -127,7 +175,22 @@ export class Room {
 
   private handleSignal(m: SignalMsg) {
     switch (m.type) {
+      case "waiting":
+        this.setLobby({ kind: "waiting", teacherHere: m.teacherHere });
+        break;
+      case "denied":
+        this.setLobby({ kind: "denied" });
+        this.sig.stop();
+        break;
+      case "pending":
+        this.pending = Array.isArray(m.list) ? m.list : [];
+        this.onPending(this.pending);
+        break;
+      case "admit-failed":
+        this.onAdmitFailed(m.peerId);
+        break;
       case "welcome": {
+        if (this.lobby.kind !== "admitted") this.setLobby({ kind: "admitted" });
         this.roster = new Set(m.peers.map((p) => p.peerId));
         for (const info of m.peers) this.ensurePeer(info, 0);
         // Peers we still have links to but that vanished while we were offline.

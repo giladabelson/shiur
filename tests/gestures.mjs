@@ -3,6 +3,7 @@
 // two-finger double tap = undo on the iPad, and draw-and-hold circle that then grows with the pen.
 // Usage: node tests/gestures.mjs [baseUrl] [outDir]
 import { chromium } from "playwright";
+import { admitInto } from "./lib/admit.mjs";
 import fs from "node:fs";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8787";
@@ -23,6 +24,8 @@ const browser = await chromium.launch({
   args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"],
 });
 
+// The teacher's page: it lets students in from the waiting room.
+let staff = null;
 async function join(role, name, vp, extra = {}) {
   const ctx = await browser.newContext({ permissions: ["camera", "microphone"], viewport: vp, ...extra });
   const page = await ctx.newPage();
@@ -34,6 +37,8 @@ async function join(role, name, vp, extra = {}) {
   await page.click(".prejoin .btn.big");
   await page.waitForSelector(".lesson");
   await page.waitForFunction(() => !!window.__view && !!window.__board);
+  if (role === "teacher") staff ??= page;
+  if (role === "student") await admitInto(staff, page, name);
   return page;
 }
 

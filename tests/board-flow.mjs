@@ -4,6 +4,7 @@
 // from the home screen after a break (but not on a reload).
 // Usage: node tests/board-flow.mjs [baseUrl] [outDir]
 import { chromium } from "playwright";
+import { admitInto } from "./lib/admit.mjs";
 import fs from "node:fs";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8787";
@@ -32,6 +33,8 @@ async function enter(page, name) {
   await page.waitForSelector(".lesson");
   await page.waitForFunction(() => !!window.__view && !!window.__board);
 }
+// The teacher's page: it lets students in from the waiting room.
+let staff = null;
 async function join(role, name, vp, extra = {}, urlExtra = "") {
   const ctx = await browser.newContext({ permissions: ["camera", "microphone"], viewport: vp, ...extra });
   const page = await ctx.newPage();
@@ -39,6 +42,8 @@ async function join(role, name, vp, extra = {}, urlExtra = "") {
   page.on("pageerror", (e) => { console.log(`[${name}] PAGE ERROR ${e.message}`); problems.push(`${name}: ${e.message}`); });
   await page.goto(`${BASE}/r/${ROOM}${query(role, urlExtra)}`);
   await enter(page, name);
+  if (role === "teacher") staff ??= page;
+  if (role === "student") await admitInto(staff, page, name);
   return page;
 }
 

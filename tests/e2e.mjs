@@ -1,6 +1,7 @@
 // End-to-end test: teacher + student (+ iPad) in real Chromium with fake camera/mic.
 // Usage: node tests/e2e.mjs [baseUrl]
 import { chromium } from "playwright";
+import { admitInto } from "./lib/admit.mjs";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8787";
 const ROOM = "test" + Math.random().toString(36).slice(2, 10);
@@ -20,6 +21,8 @@ const browser = await chromium.launch({
   ],
 });
 
+// The teacher's page: it lets students in from the waiting room.
+let staff = null;
 async function join(role, name) {
   const ctx = await browser.newContext({ permissions: ["camera", "microphone"], viewport: { width: 1280, height: 800 } });
   const page = await ctx.newPage();
@@ -31,6 +34,8 @@ async function join(role, name) {
   await page.waitForTimeout(800);
   await page.click(".prejoin .btn.big");
   await page.waitForSelector(".lesson");
+  if (role === "teacher") staff ??= page;
+  if (role === "student") await admitInto(staff, page, name);
   return { ctx, page };
 }
 
