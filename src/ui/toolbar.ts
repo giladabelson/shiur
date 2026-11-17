@@ -6,7 +6,7 @@ import type { Board } from "../board/board";
 import { BoardView, renderPage, type ShapeKind, type ViewTool } from "../board/view";
 import type { Template } from "../board/model";
 import { h, icon, iconBtn, toast } from "./dom";
-import { exportPdf, downloadBlob } from "../board/export";
+import { exportPdf, downloadBlob, pagesToExport } from "../board/export";
 import { openDesmos } from "./desmos";
 
 const COLORS = ["#1f2937", "#2563eb", "#dc2626", "#16a34a", "#ea580c", "#9333ea", "#0891b2", "#db2777", "#ca8a04", "#ffffff"];
@@ -44,13 +44,6 @@ function loadFavs(): Fav[] {
   } catch { /* ignore */ }
   return DEFAULT_FAVS.map((f) => ({ ...f }));
 }
-
-// TODO(integration): BoardView is getting `lassoMode` and Board `followOn` / `setFollow`
-// from a parallel change. These narrow intersection types let the toolbar build before
-// that lands and keep type-checking after it; drop them once both are in place.
-type LassoMode = "free" | "rect";
-type LassoView = BoardView & { lassoMode?: LassoMode };
-type FollowBoard = Board & { followOn?: boolean; setFollow?: (on: boolean) => void };
 
 // ---------- popover (pages, files, zoom) ----------
 let openPop: { el: HTMLElement; anchor: HTMLElement } | null = null;
@@ -99,8 +92,6 @@ const POINT_TOOLS: ViewTool[] = ["laser"];
 type BarTool = "pen" | "hl" | "shape" | "eraser" | "lasso" | "laser";
 
 export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
-  const lv = view as LassoView;
-  const fb = board as FollowBoard;
   const toolBtns = new Map<ViewTool, HTMLButtonElement>();
   /** Re-sync the "on" state of every option button; filled by the option builders below. */
   const syncs: (() => void)[] = [];
@@ -112,8 +103,8 @@ export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
   });
   const followBtn = h("button", { class: "followbtn", type: "button" }, icon("eye", 18), h("span", null, "התלמיד עוקב אחרי הזום שלי"));
   followBtn.addEventListener("click", () => {
-    const on = !(fb.followOn ?? true);
-    fb.setFollow?.(on);
+    const on = !board.followOn;
+    board.setFollow(on);
     toast(on ? "התלמיד רואה את הלוח בדיוק כמוך (זום ומיקום)" : "התלמיד מזיז ומגדיל את הלוח בעצמו");
     refresh();
   });
@@ -123,7 +114,6 @@ export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
     const px = Number(localStorage.getItem(ERASER_KEY));
     if (ERASER_SIZES.some((z) => z.px === px)) view.eraserPx = px;
   } catch { /* ignore */ }
-  if (lv.lassoMode !== "rect") lv.lassoMode = "free";
 
   fileInput.addEventListener("change", async () => {
     const f = fileInput.files?.[0];
@@ -280,8 +270,8 @@ export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
   ));
   panels.set("lasso", h("div", { class: "opanel" },
     group(
-      opt("סימון חופשי", () => lv.lassoMode !== "rect", () => { lv.lassoMode = "free"; }, "lasso", "סימון חופשי: מקיפים ביד את מה שרוצים לבחור"),
-      opt("מלבן", () => lv.lassoMode === "rect", () => { lv.lassoMode = "rect"; }, "rect", "סימון במלבן: גוררים מלבן סביב מה שרוצים לבחור"),
+      opt("סימון חופשי", () => view.lassoMode === "free", () => { view.lassoMode = "free"; }, "lasso", "סימון חופשי: מקיפים ביד את מה שרוצים לבחור"),
+      opt("מלבן", () => view.lassoMode === "rect", () => { view.lassoMode = "rect"; }, "rect", "סימון במלבן: גוררים מלבן סביב מה שרוצים לבחור"),
     ),
     h("span", { class: "ohint" }, "אחרי הסימון: להזיז, להגדיל, לצבוע, להעתיק או למחוק"),
   ));
@@ -333,9 +323,11 @@ export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
     pdfBtn.classList.add("busy");
     toast("מכין PDF של כל הלוח…");
     try {
+      // The blank page waiting after the last written one isn't exported: count what is.
+      const count = pagesToExport(board).length;
       const blob = await exportPdf(board, (done, total) => { pdfBtn.title = `מכין PDF… ${done}/${total}`; });
       downloadBlob(blob, `${opts.roomName}-${stamp()}.pdf`);
-      toast(`ה-PDF מוכן (${board.pages.length} עמודים)`);
+      toast(`ה-PDF מוכן (${count === 1 ? "עמוד אחד" : `${count} עמודים`})`);
     } catch (e) {
       console.error(e);
       toast("לא הצלחתי ליצור PDF");
@@ -414,7 +406,7 @@ export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
     lockBtn.replaceChildren(icon(locked ? "lock" : "unlock"));
     lockBtn.title = locked ? "התלמיד רק מצביע עם העכבר. לחץ כדי לאפשר לו לכתוב" : "התלמיד יכול לכתוב. לחץ כדי שרק יצביע";
     lockBtn.setAttribute("aria-label", lockBtn.title);
-    const following = fb.followOn ?? true;
+    const following = board.followOn;
     followBtn.classList.toggle("on", following);
     followBtn.setAttribute("aria-pressed", String(following));
     followBtn.title = following

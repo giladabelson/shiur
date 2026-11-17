@@ -194,7 +194,11 @@ try {
   const S2 = await join("student", "צופה", { width: 1000, height: 700 });
   check("a late student starts on the teacher's view", await until(async () => {
     const t = await viewOf(T), s = await viewOf(S2);
-    return s.page === t.page && Math.abs(s.cx - t.cx) < 6 && Math.abs(s.cy - t.cy) < 6;
+    // Same zoom (the teacher's region fits the student's screen on one axis) and the same spot.
+    // A screen with other proportions may be clamped at the edge of the document, so the center
+    // can shift a little vertically, but the teacher's center must stay well inside the student's view.
+    const sameZoom = Math.abs(s.w - t.w) / t.w < 0.05 || Math.abs(s.h - t.h) / t.h < 0.05;
+    return s.page === t.page && sameZoom && Math.abs(s.cx - t.cx) < 6 && Math.abs(s.cy - t.cy) < s.h * 0.15;
   }, 15000));
   await S2.context().close();
   await T.evaluate(() => window.__view.fitPage());

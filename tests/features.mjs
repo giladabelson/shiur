@@ -52,13 +52,15 @@ const circle = (cx, cy, r, n = 48) => Array.from({ length: n + 1 }, (_, i) => [c
 const line = (x0, y0, x1, y1, n = 20) => Array.from({ length: n + 1 }, (_, i) => [x0 + ((x1 - x0) * i) / n, y0 + ((y1 - y0) * i) / n]);
 const visible = (page) => page.evaluate(() => Object.values(window.__board.state.strokes).filter((s) => !s.del));
 const tool = (page, label) => page.click(`.toolbar button[aria-label^="${label}"]`);
+// page / file / zoom menus are popovers
 const menuItem = (page, text) => page.click(`.pop .pop-item:has-text("${text}")`);
-const openToolMenu = async (page, label) => {
-  const sel = `.toolbar button[aria-label^="${label}"]`;
+// two-row toolbar: picking a tool (first row) shows its options in the row beneath it (.tb-opts)
+const pickTool = async (page, label) => {
+  const sel = `.toolbar .tb-row button[aria-label^="${label}"]`;
   if (!(await page.locator(sel).first().evaluate((b) => b.classList.contains("on")))) await page.click(sel);
-  await page.click(sel);
-  await page.waitForSelector(".pop");
+  await page.waitForSelector(`.tb-opts .opanel:not([hidden])`);
 };
+const option = (page, label) => page.click(`.tb-opts .opanel:not([hidden]) button[aria-label="${label}"]`);
 
 try {
   const T = await join("teacher", "המורה", { width: 1366, height: 768 });
@@ -74,32 +76,32 @@ try {
   check("favourite pen (blue) used", await until(async () => (await visible(S)).some((s) => s.color === "#2563eb")));
 
   // dashed
-  await openToolMenu(I, "עט (P)");
-  await menuItem(I, "קו מקווקו");
+  await pickTool(I, "עט (P)");
+  await option(I, "קו מקווקו");
+  check("dashed option shows as on", await I.locator('.tb-opts .opanel:not([hidden]) button[aria-label="קו מקווקו"]').evaluate((b) => b.classList.contains("on")));
   await pen(I, line(100, 160, 400, 160));
   check("dashed line synced", await until(async () => (await visible(S)).some((s) => s.dash)));
-  await openToolMenu(I, "עט (P)");
-  await menuItem(I, "קו מקווקו");
+  await option(I, "קו מקווקו");
 
   // shape recognition: circle + hold
+  await pickTool(I, "עט (P)");
   await I.click('.toolbar button[aria-label="עט מועדף 1"]');
   await pen(I, circle(550, 250, 70), { hold: 800 });
   check("draw-and-hold circle -> ellipse", await until(async () => (await visible(S)).some((s) => s.tool === "ellipse")));
   await pen(I, [[100, 330], [180, 333], [260, 329], [340, 332], [420, 330]], { hold: 800 });
-  const ln = (await visible(S)).find((s) => s.tool === "line" && Math.abs(s.pts[0][1] - s.pts[1][1]) < 0.5);
-  check("draw-and-hold wobbly line -> straight horizontal line", !!ln);
+  // (wait for it to reach the student: the check used to race the sync)
+  check("draw-and-hold wobbly line -> straight horizontal line", await until(async () => (await visible(S)).some((s) => s.tool === "line" && Math.abs(s.pts[0][1] - s.pts[1][1]) < 0.5)));
 
   // shapes tool: arrow + triangle
-  await openToolMenu(I, "צורות");
-  await I.click('.pop button[aria-label="חץ"]');
+  await pickTool(I, "צורות");
+  await option(I, "חץ");
   await pen(I, line(700, 400, 850, 330, 6));
-  await openToolMenu(I, "צורות");
-  await I.click('.pop button[aria-label="משולש"]');
+  await option(I, "משולש");
   await pen(I, line(700, 450, 820, 560, 6));
   check("arrow + triangle synced", await until(async () => { const v = await visible(S); return v.some((s) => s.tool === "arrow") && v.some((s) => s.tool === "poly" && s.pts.length === 3); }));
 
-  // disappearing ink
-  await tool(I, "דיו נעלם");
+  // disappearing ink: the tool has no button any more, but peers still show it (older devices)
+  await I.evaluate(() => { window.__view.tool = "fade"; });
   await pen(I, line(150, 450, 400, 480));
   check("disappearing ink shown to student", await until(() => S.evaluate(() => window.__board.temps.size === 1), 3000));
   const nBefore = (await visible(S)).length;
@@ -108,18 +110,19 @@ try {
   check("disappearing ink gone after a few seconds (and never stored)", await until(() => S.evaluate(() => window.__board.temps.size === 0), 7000) && (await visible(S)).length === nBefore);
 
   // laser dot
-  await openToolMenu(I, "לייזר");
-  await menuItem(I, "נקודה בלבד");
+  await pickTool(I, "לייזר");
+  await option(I, "נקודה בלבד");
   await pen(I, line(300, 300, 360, 320, 5));
   check("laser dot mode seen by student", await until(() => S.evaluate(() => [...window.__board.lasers.values()].some((l) => l.dot)), 3000));
 
   // partial eraser
+  await pickTool(I, "עט (P)");
   await I.click('.toolbar button[aria-label="עט מועדף 3"]');
   await pen(I, line(100, 600, 600, 600, 60));
   await sleep(300);
   const redBefore = (await visible(S)).filter((s) => s.color === "#dc2626").length;
-  await openToolMenu(I, "מחק");
-  await menuItem(I, "מחק חלקי");
+  await pickTool(I, "מחק");
+  await option(I, "מוחק רק איפה שעוברים");
   await pen(I, line(350, 570, 350, 630, 6));
   check("partial eraser cuts the line into 2 pieces", await until(async () => (await visible(S)).filter((s) => s.color === "#dc2626").length === redBefore + 1), `${redBefore} -> ${(await visible(S)).filter((s) => s.color === "#dc2626").length}`);
   await I.click('.toolbar button[aria-label^="בטל"]');
@@ -127,8 +130,8 @@ try {
   await I.screenshot({ path: `${OUT}/02-ipad-drawings.png` });
 
   // axes + lasso (teacher on the laptop with the mouse)
-  await openToolMenu(T, "צורות");
-  await menuItem(T, "צירי x / y");
+  await pickTool(T, "צורות");
+  await option(T, "הוסף צירי x / y לעמוד");
   check("axes inserted (2 arrows + 16 ticks) and selected", await until(async () => (await T.evaluate(() => document.querySelector(".sel-menu").hidden === false)) && (await visible(S)).filter((s) => s.tool === "arrow").length >= 3));
   await sleep(300);
   await T.screenshot({ path: `${OUT}/03-teacher-axes-selected.png` });
@@ -172,6 +175,7 @@ try {
   const studentPage = await S.evaluate(() => window.__board.currentPage.id);
   await T.click('.toolbar button[aria-label="עמודים ורקע"]');
   await menuItem(T, "דף פרטי");
+  await pickTool(I, "עט (P)");
   await I.click('.toolbar button[aria-label="עט מועדף 1"]');
   await pen(I, line(200, 200, 500, 260));
   check("iPad sees the private page and writes on it", await until(() => I.evaluate(() => window.__board.currentPage.priv === true && window.__board.strokes(window.__board.currentPage.id).length === 1)));

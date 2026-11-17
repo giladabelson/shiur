@@ -156,15 +156,13 @@ try {
   check("laser leaves no stroke", (await strokes(S.page)) === 4);
 
   // shapes + colors from the iPad
+  // two-row toolbar: the selected tool's options are in the row beneath it (.tb-opts)
   await I.page.click('button[aria-label^="צורות"]');
-  await I.page.click('button[aria-label^="צורות"]');
-  await I.page.click('.pop button[aria-label="מלבן"]');
-  await I.page.click('.stylebtn');
-  await I.page.click(".pop .swatch >> nth=2");
+  await I.page.click('.tb-opts .opanel:not([hidden]) button[aria-label="מלבן"]');
+  await I.page.click(".tb-opts .opanel:not([hidden]) .oswatch >> nth=2");
   await penStroke(I.page, [[150, 480], [250, 560], [350, 620]]);
   await I.page.click('button[aria-label="עט (P)"]');
-  await I.page.click('.stylebtn');
-  await I.page.click(".pop .swatch >> nth=1");
+  await I.page.click(".tb-opts .opanel:not([hidden]) .oswatch >> nth=1");
   await penStroke(I.page, curve(700, 450, 200, 50));
   check("shape + colored stroke synced", await until(async () => (await strokes(S.page)) === 6));
   await sleep(300);

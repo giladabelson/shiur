@@ -31,8 +31,34 @@ export interface LiveStroke {
 export interface Laser {
   page: string;
   dot: boolean;
-  trail: { x: number; y: number; at: number }[];
+  /** Where the pointer is now; `show`: draw the red dot there (dot mode, or a hovering pointer). */
+  head: { x: number; y: number; at: number; show: boolean };
+  /**
+   * Trail points. Only consecutive points of the same segment are joined: a new segment starts at
+   * every press, so a word written with the laser doesn't get lines between its letters.
+   */
+  trail: { x: number; y: number; at: number; seg: number }[];
 }
+
+/** One laser sample: a press (trail), a mouse hover (trail + dot) or a Pencil hover (dot only). */
+export interface LaserPt {
+  x: number;
+  y: number;
+  /** Segment id: points are joined only within the same segment. */
+  seg: number;
+  /** Hovering (no button pressed): show the pointer's dot. */
+  hover?: boolean;
+  /** Moves only the dot, adds nothing to the trail (Apple Pencil hover). */
+  noTrail?: boolean;
+}
+
+/** Laser trail: each point stays this long, then fades out over LASER_FADE_MS. */
+export const LASER_HOLD_MS = 1600;
+export const LASER_FADE_MS = 600;
+const LASER_DOT_MS = 1500;
+const LASER_MAX_PTS = 800;
+/** A lasso drag preview (b.xf) for strokes that were committed (b.upd) this recently is stale. */
+const XF_STALE_MS = 1500;
 
 /** 2D affine matrix [a, b, c, d, e, f]: x' = a*x + c*y + e, y' = b*x + d*y + f */
 export type Mat = [number, number, number, number, number, number];
@@ -85,6 +111,10 @@ export class Board {
   /** Strokes being dragged by someone's lasso right now (rendered transformed until committed). */
   readonly previews = new Map<string, Mat>();
   private previewAt = new Map<string, number>();
+  /** Lasso drags (by their id) whose end we already got: late previews from them are ignored. */
+  private endedDrags = new Set<string>();
+  /** When a stroke last got a b.upd from a peer (old peers' previews carry no version). */
+  private updAt = new Map<string, number>();
   private clip: Stroke[] = [];
   private undoStack: UndoEntry[] = [];
   private redoStack: UndoEntry[] = [];
@@ -480,11 +510,42 @@ export class Board {
     if (out.length) this.local({ t: "b.upd", items: out });
   }
 
-  /** Live preview of a lasso drag for everyone else (no state change). */
-  previewTransform(ids: string[], m: Mat | null) {
+  /**
+   * Live preview of a lasso drag for everyone else (no state change). `drag.g` identifies this
+   * drag and `drag.v` is the version the first stroke had when it started, so a preview that
+   * arrives late (after the move was committed, or after the drag ended) is recognised and ignored.
+   */
+  previewTransform(ids: string[], m: Mat | null, drag?: { g: string; v: number }) {
     const page = this.state.strokes[ids[0]]?.page;
     if (!page) return;
-    this.net.broadcastLive({ t: "b.xf", ids, m, page }, isPrivate(this.state, page));
+    this.net.broadcastLive({ t: "b.xf", ids, m, page, g: drag?.g, v: drag?.v }, isPrivate(this.state, page));
+  }
+
+  private remotePreview(msg: { ids: string[]; m: Mat | null; g?: string; v?: number }) {
+    if (!Array.isArray(msg.ids)) return;
+    const now = performance.now();
+    if (!msg.m) {
+      if (msg.g) this.endedDrags.add(msg.g);
+      if (this.endedDrags.size > 200) this.endedDrags.clear();
+    } else if (msg.g && this.endedDrags.has(msg.g)) return; // the drag already ended: a late packet
+    if (msg.m) {
+      // Stale: the strokes were already moved (committed) since this drag started.
+      const first = this.state.strokes[msg.ids[0]];
+      if (typeof msg.v === "number" ? (first?.pv ?? 0) > msg.v : msg.ids.some((id) => now - (this.updAt.get(id) ?? -Infinity) < XF_STALE_MS)) return;
+    }
+    let membership = false;
+    for (const id of msg.ids) {
+      if (msg.m) {
+        if (!this.previews.has(id)) membership = true;
+        this.previews.set(id, msg.m);
+        this.previewAt.set(id, now);
+      } else if (this.previews.delete(id)) {
+        this.previewAt.delete(id);
+        membership = true;
+      }
+    }
+    // Strokes being moved are left out of the base layer: redraw it only when that set changes.
+    this.onChange(membership ? "all" : "live");
   }
 
   transformStrokes(ids: string[], m: Mat) {
@@ -580,20 +641,47 @@ export class Board {
   }
 
   // ---------- pointer ----------
-  laser(x: number, y: number, dot: boolean, page = this.currentPage.id) {
-    const msg = { t: "b.laser", page, x, y, dot };
-    this.addLaser(this.me, msg.page, x, y, dot);
+  /**
+   * The laser pointer moved (one or more samples since the last frame, all with the same
+   * segment / hover state). Old peers read only x, y, dot (the last sample).
+   */
+  laser(pts: LaserPt[], dot: boolean, page = this.currentPage.id) {
+    const last = pts[pts.length - 1];
+    if (!last) return;
+    const r = (n: number) => Math.round(n * 10) / 10;
+    const msg = {
+      t: "b.laser", page, x: r(last.x), y: r(last.y), dot, s: last.seg, hv: last.hover ? 1 : 0, nt: last.noTrail ? 1 : 0,
+      pts: pts.length > 1 ? pts.map((p) => [r(p.x), r(p.y)]) : undefined,
+    };
+    for (const p of pts) this.addLaser(this.me, page, p, dot);
+    this.onChange("live");
     this.net.broadcastLive(msg, isPrivate(this.state, msg.page));
   }
 
-  private addLaser(who: string, page: string, x: number, y: number, dot: boolean) {
+  private addLaser(who: string, page: string, p: LaserPt, dot: boolean) {
+    const now = performance.now();
     let l = this.lasers.get(who);
     if (!l || l.page !== page || l.dot !== dot) {
-      l = { page, dot, trail: [] };
+      l = { page, dot, head: { x: p.x, y: p.y, at: now, show: false }, trail: [] };
       this.lasers.set(who, l);
     }
-    l.trail.push({ x, y, at: performance.now() });
-    if (l.trail.length > 40) l.trail.shift();
+    l.head = { x: p.x, y: p.y, at: now, show: dot || !!p.hover };
+    if (!dot && !p.noTrail) {
+      l.trail.push({ x: p.x, y: p.y, at: now, seg: p.seg });
+      if (l.trail.length > LASER_MAX_PTS) l.trail.shift();
+    }
+  }
+
+  private remoteLaser(peerId: string, msg: any) {
+    if (typeof msg.page !== "string") return;
+    // Old peers send no segment (every point joined) and no hover flag (the dot always shows).
+    const seg = typeof msg.s === "number" ? msg.s : -1;
+    const hover = msg.hv === undefined ? true : !!msg.hv;
+    const noTrail = !!msg.nt;
+    const list: [number, number][] = Array.isArray(msg.pts) ? msg.pts : [[msg.x, msg.y]];
+    for (const [x, y] of list) {
+      if (Number.isFinite(x) && Number.isFinite(y)) this.addLaser(peerId, msg.page, { x, y, seg, hover, noTrail }, !!msg.dot);
+    }
     this.onChange("live");
   }
 
@@ -778,6 +866,8 @@ export class Board {
           ls = { id: msg.id, page: msg.page, author: peerId, tool: msg.tool, color: msg.color, size: msg.size, sp: msg.sp, dash: msg.dash, pts: [], at: 0 };
           this.live.set(msg.id, ls);
         }
+        // A stroke can change tool while it's drawn (draw-and-hold snaps it to a shape).
+        if (typeof msg.tool === "string") ls.tool = msg.tool;
         if (msg.rep) ls.pts = msg.pts;
         else if (typeof msg.o === "number") {
           // Points carry their index, so messages that arrive late or out of order land in the right place.
@@ -788,7 +878,7 @@ export class Board {
         return;
       }
       case "b.laser":
-        this.addLaser(peerId, msg.page, msg.x, msg.y, !!msg.dot);
+        this.remoteLaser(peerId, msg);
         return;
       case "b.temp":
         this.live.delete(msg.s.id);
@@ -796,11 +886,7 @@ export class Board {
         this.onChange("live");
         return;
       case "b.xf":
-        for (const id of msg.ids as string[]) {
-          if (msg.m) { this.previews.set(id, msg.m); this.previewAt.set(id, performance.now()); }
-          else this.previews.delete(id);
-        }
-        this.onChange("all");
+        this.remotePreview(msg);
         return;
       case "b.assetReq":
         if (this.haveAssets.has(msg.id)) void this.sendAsset(peerId, msg.id);
@@ -821,7 +907,14 @@ export class Board {
       if (LESSON_OPS.has(msg.t) && msg.L && this.state.lesson && msg.L !== this.state.lesson.id) return;
       const op = msg as BoardOp;
       if (op.t === "b.stroke") this.live.delete(op.s.id);
-      if (op.t === "b.upd") for (const it of op.items) this.previews.delete(it.id);
+      if (op.t === "b.upd") {
+        const now = performance.now();
+        for (const it of op.items) {
+          this.previews.delete(it.id);
+          this.previewAt.delete(it.id);
+          this.updAt.set(it.id, now);
+        }
+      }
       if (applyOp(this.state, op)) {
         if (op.t !== "b.go") this.lastAct = Date.now();
         this.persist();
@@ -840,15 +933,17 @@ export class Board {
       if (now - ls.at > 8000) { this.live.delete(id); changed = true; }
     }
     for (const [who, l] of this.lasers) {
-      const keep = l.dot ? 1500 : 900;
-      while (l.trail.length && now - l.trail[0].at > keep) { l.trail.shift(); changed = true; }
-      if (!l.trail.length) this.lasers.delete(who);
+      while (l.trail.length && now - l.trail[0].at > LASER_HOLD_MS + LASER_FADE_MS) { l.trail.shift(); changed = true; }
+      if (!l.trail.length && now - l.head.at > LASER_DOT_MS) { this.lasers.delete(who); changed = true; }
     }
     if (this.temps.size) changed = true;
     for (const [id, t] of this.temps) if (now - t.at > TEMP_HOLD_MS + TEMP_FADE_MS) this.temps.delete(id);
+    let expired = false;
     for (const [id, at] of this.previewAt) {
-      if (now - at > 5000) { this.previews.delete(id); this.previewAt.delete(id); changed = true; }
+      if (now - at > 5000) { this.previews.delete(id); this.previewAt.delete(id); expired = true; }
     }
-    return changed;
+    if (expired) this.onChange("all"); // the base layer drew without those strokes
+    for (const [id, at] of this.updAt) if (now - at > XF_STALE_MS) this.updAt.delete(id);
+    return changed || expired;
   }
 }
