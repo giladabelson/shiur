@@ -14,6 +14,7 @@ import { downloadBlob } from "../board/export";
 import { h, icon, iconBtn, toast, clear, fmtDuration } from "./dom";
 import { askPhone } from "./phone-dialog";
 import { inviteText, openWhatsApp, studentByRoom } from "./students";
+import { isTouchDevice, reserveTab, sendPdfToStudent } from "./send-pdf";
 import { inviteDialog } from "./invite";
 
 const ROLE_TITLE: Record<Role, string> = { teacher: "מורה", student: "תלמיד", ipad: "אייפד" };
@@ -634,6 +635,11 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       if (!confirm("לצאת מהשיעור?")) return;
       // Teacher: save the lesson's board as a PDF before leaving.
       let saved: Awaited<ReturnType<typeof saveLessonPdf>> = null;
+      const studentName = studentByRoom(roomId)?.name ?? (roomName.replace(/^שיעור-?/, "") || "");
+      const phone = role === "teacher" && hasContent(board.state) ? studentByRoom(roomId)?.phone : undefined;
+      // The board goes to the student's WhatsApp right after the lesson. The tab is opened now, inside
+      // the click (a tab opened after the PDF is ready would be blocked as a popup).
+      const waTab = phone && !isTouchDevice() ? reserveTab() : null;
       if (role === "teacher" && hasContent(board.state)) {
         leaveCtl.disabled = true;
         leaveCtl.replaceChildren(icon("pdf", 18), " שומר PDF…");
@@ -644,6 +650,13 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
           ]);
         } catch (e) { console.error(e); }
       }
+      const pdfUrl = saved?.uploaded ? new URL(`/api/lessons/${saved.room}/${saved.lesson}.pdf`, location.origin).toString() : undefined;
+      const sendToStudent = (tab: Window | null) => {
+        if (!saved || !phone) return;
+        void sendPdfToStudent({ phone, studentName, url: pdfUrl, blob: saved.blob, fileName: saved.name, tab });
+      };
+      if (saved && phone && (waTab || pdfUrl)) sendToStudent(waTab);
+      else waTab?.close();
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVis);
       room.leave();
@@ -658,6 +671,16 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
         saved ? h("p", { class: "saved-note" }, saved.uploaded
           ? "ה-PDF של הלוח נשמר בענן ובמחשב הזה. אפשר להוריד אותו או לשלוח לתלמיד מ\"שיעורים קודמים\" במסך הראשי."
           : "ה-PDF של הלוח נשמר במחשב הזה. אפשר להוריד אותו מ\"שיעורים קודמים\" במסך הראשי.") : null,
+        saved && role === "teacher" ? h("button", {
+          class: "btn wa", type: "button",
+          onclick: async () => {
+            let p = phone ?? studentByRoom(roomId)?.phone;
+            if (!p) p = (await askPhone(roomId, studentName || "התלמיד")) ?? undefined;
+            if (!p) return;
+            const tab = pdfUrl || !isTouchDevice() ? reserveTab() : null;
+            void sendPdfToStudent({ phone: p, studentName, url: pdfUrl, blob: saved!.blob, fileName: saved!.name, tab });
+          },
+        }, icon("wa", 18), " שלח לתלמיד בוואטסאפ") : null,
         saved ? h("button", { class: "btn ghost", onclick: () => downloadBlob(saved!.blob, saved!.name) }, icon("download", 18), " הורד את ה-PDF") : null,
         h("button", { class: "btn", onclick: () => location.reload() }, "חזרה לשיעור"),
         role === "teacher" ? h("a", { class: "btn ghost", href: "/" }, "למסך הראשי") : null,

@@ -4,7 +4,8 @@ import { downloadBlob } from "../board/export";
 import { h, icon, toast } from "./dom";
 import { KEEP_DAYS, listLessons, type LessonEntry } from "./lessons";
 import { askPhone } from "./phone-dialog";
-import { openWhatsApp, pdfText, studentByRoom } from "./students";
+import { studentByRoom } from "./students";
+import { isTouchDevice, reserveTab, sendPdfToStudent } from "./send-pdf";
 
 export function openLessonsDialog(room: string, studentName: string) {
   const body = h("div", { class: "lessons" }, h("p", { class: "muted" }, "טוען…"));
@@ -57,23 +58,9 @@ export function openLessonsDialog(room: string, studentName: string) {
             let phone = studentByRoom(room)?.phone;
             if (!phone) phone = (await askPhone(room, studentName)) ?? undefined;
             if (!phone) return;
-            if (abs) {
-              // Cloud copy: the student gets a link straight in the chat.
-              openWhatsApp(phone, pdfText(studentName, abs));
-              return;
-            }
-            const b = await getBlob();
-            if (!b) return toast("הקובץ לא נמצא");
-            const file = new File([b], it.name || "lesson.pdf", { type: "application/pdf" });
-            // Phone / iPad: the share sheet sends the file itself (choose WhatsApp there).
-            if ((navigator as any).canShare?.({ files: [file] })) {
-              try { await navigator.share({ files: [file], title: it.name }); } catch { /* cancelled */ }
-              return;
-            }
-            // Computer: download the file and open the chat; drag the file into it.
-            downloadBlob(b, it.name || "lesson.pdf");
-            openWhatsApp(phone, pdfText(studentName));
-            toast("הקובץ ירד למחשב. גרור אותו לצ'אט שנפתח בוואטסאפ", 6000);
+            // Opened now, inside the click, so it isn't blocked; pointed at the chat once the file is ready.
+            const tab = abs || !isTouchDevice() ? reserveTab() : null;
+            await sendPdfToStudent({ phone, studentName, url: abs || undefined, blob: abs ? null : await getBlob(), fileName: it.name || "lesson.pdf", tab });
           },
         }, icon("wa", 18), " שלח בוואטסאפ"),
         abs ? h("button", {
