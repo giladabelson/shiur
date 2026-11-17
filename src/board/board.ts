@@ -105,6 +105,8 @@ export class Board {
   onLessonArchived: (state: BoardState) => void = () => {};
   /** Another device (the teacher's) moved its view and this device should follow. */
   onRemoteView: (v: ViewMsg) => void = () => {};
+  /** This device just turned "follow the teacher" on: send our view so everyone catches up. */
+  onFollowEnabled: () => void = () => {};
 
   constructor(readonly roomId: string, readonly me: string, readonly role: string, private net: BoardTransport) {}
 
@@ -362,6 +364,7 @@ export class Board {
 
   setFollow(on: boolean) {
     this.local({ t: "b.follow", on, ts: Math.max(Date.now(), (this.state.follow?.ts ?? 0) + 1) });
+    if (on) this.onFollowEnabled();
   }
 
   /** Teacher's devices: tell everyone (or one peer) what part of the board is on screen. */

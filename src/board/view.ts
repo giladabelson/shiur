@@ -600,13 +600,16 @@ export class BoardView {
   /** Show the same part of the board as the teacher (never sent on: no loops). */
   applyRemoteView(v: ViewMsg) {
     if (this.busy) return;
-    const top = this.topOf(v.page);
+    const top = this.board.state === this.stateRef ? this.topOf(v.page) : undefined;
     if (top === undefined || this.cssW <= 1 || this.cssH <= 1) {
       // The page hasn't arrived yet (or the board is hidden): apply it when it can be.
       this.pendingView = { v, at: performance.now() };
       return;
     }
     this.pendingView = null;
+    // This is newer than a page switch that may still be waiting to be shown (e.g. from the snapshot).
+    this.needsHome = false;
+    this.goTs = this.board.state.current.ts;
     this.scale = Math.max(0.1, Math.min(12, Math.min(this.cssW / v.w, this.cssH / v.h)));
     this.ox = this.cssW / 2 - v.cx * this.scale;
     this.oy = this.cssH / 2 - (top + v.cy) * this.scale;

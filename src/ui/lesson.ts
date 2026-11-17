@@ -184,6 +184,7 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
     let lastLock = board.state.lock.on;
     // The teacher's view (scroll / zoom) arrives: show the same part of the board.
     board.onRemoteView = (v) => view.applyRemoteView(v);
+    board.onFollowEnabled = () => view.sendViewNow();
     board.onChange = (what, strokeId) => {
       view.invalidate(what, strokeId);
       if (what !== "live" && what !== "stroke") {
