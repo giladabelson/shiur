@@ -216,11 +216,98 @@ a { color: var(--accent); }
 .ibtn.floating { position: absolute; bottom: 10px; inset-inline-end: 10px; background: rgba(255,255,255,.9); }
 
 .toolbar {
-  display: flex; gap: 4px 6px; padding: 5px 8px; background: var(--panel); align-items: center; overflow-x: auto;
-  scrollbar-width: thin; -webkit-user-select: none; user-select: none; border-bottom: 1px solid var(--line);
+  display: flex; flex-direction: column; background: var(--panel); flex-shrink: 0;
+  -webkit-user-select: none; user-select: none; border-bottom: 1px solid var(--line); container-type: inline-size;
 }
+.tb-row, .tb-opts { display: flex; align-items: center; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
+.tb-row { gap: 6px; padding: 4px 8px; }
 .tgroup { display: flex; gap: 2px; align-items: center; padding-inline-end: 6px; border-inline-end: 1px solid var(--line); flex-shrink: 0; }
-.tgroup:last-of-type { border: 0; }
+.tgroup:last-child { border: 0; }
+.toolbar .ibtn { width: 40px; height: 40px; }
+/* the six tools: icon with a small label underneath */
+.tbtn {
+  min-width: 52px; height: 48px; padding: 3px 6px 2px; display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+  border: 0; background: transparent; border-radius: 10px; cursor: pointer; color: var(--ink2); flex-shrink: 0; touch-action: manipulation; font: inherit;
+}
+.tbtn-ic { display: grid; place-items: center; height: 24px; }
+.tbtn-lbl { font-size: 11.5px; line-height: 1.1; white-space: nowrap; }
+.tbtn:hover { background: var(--hover); }
+.tbtn.on { background: var(--accent); color: #fff; }
+.tbtn:disabled { opacity: .3; cursor: not-allowed; }
+.tbtn:disabled:hover { background: transparent; }
+.tbtn:focus-visible, .optbtn:focus-visible, .oswatch:focus-visible, .osize:focus-visible, .followbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* the pointer: a distinct red pill, sitting in the middle of the bar */
+.tgroup.tools { border: 0; padding-inline-end: 0; }
+.tgroup.pointer-slot { margin-inline: auto; padding-inline: 8px; border: 0; }
+.tbtn.pointer {
+  flex-direction: row; gap: 6px; height: 46px; padding: 0 16px 0 14px; border-radius: 999px;
+  background: #fdeaea; color: #c03030; box-shadow: inset 0 0 0 1.5px #f3b9b9;
+}
+.tbtn.pointer .tbtn-lbl { font-size: 15px; font-weight: 600; }
+.tbtn.pointer:hover { background: #fbdcdc; }
+.tbtn.pointer.on { background: #dc2626; color: #fff; box-shadow: 0 2px 8px rgba(220, 38, 38, .35); }
+.tbtn.pointer:disabled { opacity: 1; }
+/* teacher: "student follows my zoom" toggle */
+.followbtn {
+  display: inline-flex; align-items: center; gap: 6px; height: 40px; padding: 0 10px; max-width: 150px; border-radius: 10px; flex-shrink: 0;
+  border: 0; background: transparent; color: var(--muted); cursor: pointer; font: inherit; font-size: 12px; line-height: 1.15; text-align: start; touch-action: manipulation;
+  box-shadow: inset 0 0 0 1px var(--line2);
+}
+.followbtn svg { flex-shrink: 0; }
+.followbtn:hover { background: var(--hover); }
+.followbtn.on { background: var(--accent-soft); color: var(--accent2); box-shadow: inset 0 0 0 1px #b9c8f0; }
+
+/* second row: options of the selected tool */
+.tb-opts { padding: 3px 8px 4px; background: var(--paper2); border-top: 1px solid var(--line); min-height: 50px; }
+.opanel { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.opanel[hidden] { display: none; }
+.opanel.disabled { opacity: .35; }
+.ogroup { display: flex; align-items: center; gap: 2px; flex-shrink: 0; padding-inline-end: 8px; border-inline-end: 1px solid var(--line2); }
+.ogroup:last-child { border: 0; }
+.olabel { color: var(--muted); font-size: 12px; padding-inline: 2px 4px; white-space: nowrap; }
+.ohint { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.optbtn {
+  display: inline-flex; align-items: center; gap: 6px; height: 40px; min-width: 40px; padding: 0 12px; border-radius: 10px; flex-shrink: 0;
+  border: 0; background: transparent; color: var(--ink2); cursor: pointer; font: inherit; font-size: 14px; white-space: nowrap; touch-action: manipulation;
+}
+.optbtn.icononly { padding: 0; justify-content: center; width: 42px; }
+.optbtn:hover { background: var(--hover); }
+.optbtn.on { background: var(--accent-soft); color: var(--accent2); box-shadow: inset 0 0 0 1.5px #b9c8f0; }
+.optbtn:disabled, .oswatch:disabled, .osize:disabled { cursor: not-allowed; }
+.optbtn.erasersz::before { content: ""; border-radius: 50%; border: 2px solid currentColor; flex-shrink: 0; }
+.optbtn.sz10::before { width: 6px; height: 6px; }
+.optbtn.sz16::before { width: 11px; height: 11px; }
+.optbtn.sz24::before { width: 17px; height: 17px; }
+.oswatch {
+  width: 36px; height: 40px; display: grid; place-items: center; border: 0; background: transparent; border-radius: 10px;
+  cursor: pointer; padding: 0; flex-shrink: 0; touch-action: manipulation;
+}
+.oswatch > span { width: 26px; height: 26px; border-radius: 50%; border: 2px solid rgba(31,42,68,.14); display: block; transition: transform .1s; }
+.oswatch:hover { background: var(--hover); }
+.oswatch.on > span { border-color: #fff; box-shadow: 0 0 0 2.5px var(--accent); transform: scale(1.08); }
+.oswatch.customwrap .swatch.custom { margin: 0; width: 26px; height: 26px; }
+.oswatch.customwrap.on .swatch.custom { border: 2px solid #fff; box-shadow: 0 0 0 2.5px var(--accent); }
+.osize { width: 40px; height: 40px; border: 0; background: transparent; display: grid; place-items: center; border-radius: 10px; cursor: pointer; flex-shrink: 0; touch-action: manipulation; }
+.osize span { background: var(--ink); border-radius: 50%; display: block; }
+.osize:hover { background: var(--hover); }
+.osize.on { background: var(--accent-soft); box-shadow: inset 0 0 0 1.5px #b9c8f0; }
+/* narrower boards (iPad with the video column): tighten so both rows fit without scrolling */
+@container (max-width: 1080px) {
+  .tb-row { gap: 4px; padding-inline: 6px; }
+  .tgroup { padding-inline-end: 4px; }
+  .tbtn { min-width: 46px; padding-inline: 4px; }
+  .tbtn.pointer { padding: 0 12px 0 10px; }
+  .followbtn { max-width: 108px; padding: 0 8px; font-size: 11px; gap: 4px; }
+  .toolbar .pdfbtn { display: none; } /* also in the files menu */
+  .tb-opts { padding-inline: 6px; }
+  .opanel { gap: 6px; }
+  .ogroup { padding-inline-end: 6px; }
+  .olabel { display: none; }
+  .oswatch { width: 34px; }
+  .optbtn { padding: 0 9px; gap: 5px; }
+  .opanel.shapes .optbtn { padding: 0; width: 42px; justify-content: center; }
+  .opanel.shapes .optbtn > span { display: none; } /* icons only, so the whole strip fits */
+}
 .ibtn {
   width: 38px; height: 38px; display: inline-grid; place-items: center; border: 0; background: transparent;
   border-radius: 9px; cursor: pointer; color: var(--ink2); position: relative; flex-shrink: 0; touch-action: manipulation;
@@ -231,9 +318,6 @@ a { color: var(--accent); }
 .ibtn:disabled:hover { background: transparent; }
 .swatch { width: 26px; height: 26px; border-radius: 50%; border: 2px solid rgba(31,42,68,.12); cursor: pointer; margin: 0 2px; flex-shrink: 0; }
 .swatch.on { border-color: #fff; box-shadow: 0 0 0 2px var(--accent); }
-.sizebtn { width: 32px; height: 38px; border: 0; background: transparent; display: grid; place-items: center; border-radius: 8px; cursor: pointer; }
-.sizebtn span { background: var(--ink); border-radius: 50%; display: block; }
-.sizebtn.on { background: var(--accent-soft); }
 .pagelbl, .zoomlbl { min-width: 44px; text-align: center; font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); }
 
 .tiles { width: 240px; display: flex; flex-direction: column; gap: 8px; padding: 8px; overflow-y: auto; background: var(--paper2); border-inline-start: 1px solid var(--line); }
@@ -283,8 +367,6 @@ a { color: var(--accent); }
 
 /* ---------- toolbar menus ---------- */
 .ibtn .caret { position: absolute; bottom: 3px; inset-inline-start: 3px; width: 0; height: 0; border-left: 3px solid transparent; border-right: 3px solid transparent; border-top: 4px solid currentColor; opacity: .6; }
-.stylebtn .dot { display: block; border-radius: 50%; border: 2px solid rgba(31,42,68,.18); }
-.stylebtn.dashed::after { content: ""; position: absolute; bottom: 4px; left: 9px; right: 9px; border-bottom: 2px dashed var(--muted); }
 .ibtn.fav .fav-bar { position: absolute; bottom: 4px; left: 9px; right: 9px; border-radius: 3px; box-shadow: 0 0 0 1px rgba(31,42,68,.15); }
 .ibtn.fav.on { background: var(--accent-soft); outline: 2px solid var(--accent); outline-offset: -2px; }
 .zoomlbl { background: transparent; border: 0; color: var(--muted); font-size: 13px; min-width: 48px; height: 38px; border-radius: 9px; cursor: pointer; font-variant-numeric: tabular-nums; }
@@ -310,6 +392,9 @@ a { color: var(--accent); }
 
 .sel-menu { position: absolute; transform: translateX(-50%); z-index: 5; }
 .selbar { display: flex; gap: 4px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 4px 6px; box-shadow: var(--shadow-lg); }
+.board-hint { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(15,23,42,.78); color: #fff; padding: 8px 18px; border-radius: 999px; font-size: 16px; pointer-events: none; opacity: 0; }
+.board-hint.show { animation: board-hint .9s ease-out; }
+@keyframes board-hint { 0% { opacity: 0; } 15% { opacity: 1; } 65% { opacity: 1; } 100% { opacity: 0; } }
 .priv-badge { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); background: #fff1e6; color: #9a3d0b; border: 1px solid #f6c9a8; padding: 5px 12px; border-radius: 999px; font-size: 13px; pointer-events: none; }
 
 .desmos-dlg { width: min(1100px, calc(100vw - 24px)); height: min(760px, calc(100dvh - 24px)); display: flex; flex-direction: column; gap: 8px; padding: 12px; }

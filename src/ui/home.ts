@@ -108,7 +108,7 @@ export function renderHome(root: HTMLElement) {
         }, icon("trash", 18)),
       ),
       h("div", { class: "student-actions" },
-        h("a", { class: "btn", href: `${roomUrl(s.room, "teacher")}&n=${encodeURIComponent(s.name)}` }, icon("cam", 18), " התחל שיעור"),
+        h("a", { class: "btn", href: `${roomUrl(s.room, "teacher")}&n=${encodeURIComponent(s.name)}&fresh=1` }, icon("cam", 18), " התחל שיעור"),
         h("button", {
           class: "btn wa", type: "button", title: "פותח את הצ'אט עם התלמיד בוואטסאפ, עם הלינק לשיעור",
           onclick: async () => {
@@ -170,7 +170,7 @@ export function renderHome(root: HTMLElement) {
         h("section", { class: "note quick" },
           h("h2", { class: "hand" }, "שיעור מהיר"),
           h("p", null, "חדר חד-פעמי, בלי לשמור תלמיד."),
-          h("button", { class: "btn ghost", type: "button", onclick: () => { location.href = roomUrl(newRoomId(), "teacher"); } }, icon("plus", 18), " פתח חדר חדש"),
+          h("button", { class: "btn ghost", type: "button", onclick: () => { location.href = `${roomUrl(newRoomId(), "teacher")}&fresh=1`; } }, icon("plus", 18), " פתח חדר חדש"),
         ),
         h("section", { class: "note tips" },
           h("h2", { class: "hand" }, "לפני השיעור"),

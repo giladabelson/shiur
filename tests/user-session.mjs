@@ -156,15 +156,13 @@ try {
   check("laser leaves no stroke", (await strokes(S.page)) === 4);
 
   // shapes + colors from the iPad
+  // two-row toolbar: the selected tool's options are in the row beneath it (.tb-opts)
   await I.page.click('button[aria-label^="צורות"]');
-  await I.page.click('button[aria-label^="צורות"]');
-  await I.page.click('.pop button[aria-label="מלבן"]');
-  await I.page.click('.stylebtn');
-  await I.page.click(".pop .swatch >> nth=2");
+  await I.page.click('.tb-opts .opanel:not([hidden]) button[aria-label="מלבן"]');
+  await I.page.click(".tb-opts .opanel:not([hidden]) .oswatch >> nth=2");
   await penStroke(I.page, [[150, 480], [250, 560], [350, 620]]);
   await I.page.click('button[aria-label="עט (P)"]');
-  await I.page.click('.stylebtn');
-  await I.page.click(".pop .swatch >> nth=1");
+  await I.page.click(".tb-opts .opanel:not([hidden]) .oswatch >> nth=1");
   await penStroke(I.page, curve(700, 450, 200, 50));
   check("shape + colored stroke synced", await until(async () => (await strokes(S.page)) === 6));
   await sleep(300);
@@ -181,7 +179,11 @@ try {
   // 5. Teacher uploads a PDF worksheet from the laptop
   if (PDF) {
     await T.page.setInputFiles('.toolbar input[type=file]', PDF);
-    check("PDF pages added", await until(() => T.page.evaluate(() => window.__board.pages.length === 3)));
+    // the written page, the 2 PDF pages right after it, then the blank page that follows the written one
+    check("PDF pages added", await until(() => T.page.evaluate(() => {
+      const ps = window.__board.pages;
+      return ps.length === 4 && !!ps[1].bg && !!ps[2].bg && !ps[3].bg && window.__board.currentPage.id === ps[1].id;
+    })));
     check("PDF file transferred to student", await until(() => S.page.evaluate(async () => {
       const bg = window.__board.currentPage.bg;
       return !!bg && !(window.__board.haveAssets ?? new Set()).size === false;
@@ -200,7 +202,7 @@ try {
     await dl.saveAs(pdfPath);
     const pdfText = fs.readFileSync(pdfPath, "latin1");
     const pageCount = (pdfText.match(/\/Type\s*\/Page[^s]/g) || []).length;
-    check(`PDF export: file "${dl.suggestedFilename()}" with ${pageCount} pages`, pdfText.startsWith("%PDF") && pageCount === 3);
+    check(`PDF export: file "${dl.suggestedFilename()}" with ${pageCount} pages`, pdfText.startsWith("%PDF") && pageCount === 3); // the empty last page isn't exported
     // Headless Chromium reports non-English download names as "download", so read the name the app chose.
     check("PDF file name has the student's name", (await T.page.evaluate(() => window.__lastDownload || "")).includes("יואב"));
     await S.page.click('button[aria-label="עמוד הבא"]');

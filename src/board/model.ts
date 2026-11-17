@@ -71,6 +71,8 @@ export interface BoardState {
   lock: { on: boolean; ts: number };
   side?: SideFile | null;
   lesson?: LessonInfo;
+  /** on = the student's view follows the teacher's scroll / zoom. Missing = on. */
+  follow?: { on: boolean; ts: number };
 }
 
 export const PAGE_W = 1000;
@@ -106,6 +108,7 @@ export type BoardOp =
   | { t: "b.tpl"; page: string; tpl: Template; tv: number }
   | { t: "b.go"; page: string; ts: number }
   | { t: "b.lock"; on: boolean; ts: number }
+  | { t: "b.follow"; on: boolean; ts: number }
   | { t: "b.side"; side: SideFile }
   | { t: "b.sync"; state: BoardState };
 
@@ -159,6 +162,12 @@ export function applyOp(st: BoardState, op: BoardOp): boolean {
     case "b.lock":
       if (op.ts > st.lock.ts) {
         st.lock = { on: op.on, ts: op.ts };
+        return true;
+      }
+      return false;
+    case "b.follow":
+      if (op.ts > (st.follow?.ts ?? 0)) {
+        st.follow = { on: op.on, ts: op.ts };
         return true;
       }
       return false;
@@ -233,6 +242,10 @@ export function mergeState(st: BoardState, other: BoardState): boolean {
     st.lock = { ...other.lock };
     changed = true;
   }
+  if (other.follow && other.follow.ts > (st.follow?.ts ?? 0)) {
+    st.follow = { ...other.follow };
+    changed = true;
+  }
   changed = mergeSide(st, other.side) || changed;
   return changed;
 }
@@ -243,7 +256,7 @@ export function opPage(st: BoardState, op: any): string | null {
     case "b.page": return op.page.id;
     case "b.stroke": case "b.temp": return op.s.page;
     case "b.go": case "b.tpl": return op.page;
-    case "b.live": case "b.laser": return op.page;
+    case "b.live": case "b.laser": case "b.view": return op.page;
     case "b.vis": case "b.upd": return st.strokes[op.items[0]?.id]?.page ?? null;
     default: return null;
   }
@@ -255,6 +268,17 @@ export function isPrivate(st: BoardState, pageId: string | null): boolean {
 
 export function livePages(st: BoardState): Page[] {
   return Object.values(st.pages).filter((p) => !p.del).sort((a, b) => a.order - b.order || (a.id < b.id ? -1 : 1));
+}
+
+/** Id of the blank page added automatically after `lastId` (the same on every device, so they merge). */
+export function nextPageId(lastId: string): string {
+  let a = 0x811c9dc5, b = 0x01000193 ^ 0x5bd1e995;
+  for (let i = 0; i < lastId.length; i++) {
+    const c = lastId.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193);
+    b = Math.imul(b ^ c, 0x5bd1e995) ^ (b >>> 13);
+  }
+  return "n" + (a >>> 0).toString(36).padStart(7, "0") + (b >>> 0).toString(36).padStart(7, "0");
 }
 
 export function pageStrokes(st: BoardState, pageId: string): Stroke[] {

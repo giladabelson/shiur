@@ -15,17 +15,29 @@ export interface BoardLike {
  * pages are left out unless `withPrivate`, since the lesson PDF is meant for the student.
  */
 export function boardOf(state: BoardState, withPrivate = false): BoardLike {
-  return {
-    pages: livePages(state).filter((p) => withPrivate || !p.priv),
-    strokes: (pageId: string) => pageStrokes(state, pageId),
-  };
+  const strokes = (pageId: string) => pageStrokes(state, pageId);
+  return { pages: pagesToExport({ pages: livePages(state).filter((p) => withPrivate || !p.priv), strokes }), strokes };
+}
+
+/**
+ * The pages worth exporting: the board always has a blank page after the last one written on
+ * (so the teacher can keep writing), which shouldn't end up as an empty last page in the PDF.
+ */
+export function pagesToExport(board: BoardLike): Page[] {
+  const ps = board.pages.slice();
+  while (ps.length > 1) {
+    const last = ps[ps.length - 1];
+    if (last.bg || board.strokes(last.id).length) break;
+    ps.pop();
+  }
+  return ps;
 }
 
 const PAGE_PX = 1600; // render width per page: sharp enough to print, small enough for iPad memory
 
 export async function exportPdf(board: Board | BoardLike, onProgress: (done: number, total: number) => void = () => {}): Promise<Blob> {
   const { jsPDF } = await import("jspdf"); // loaded only when needed
-  const pages = board.pages;
+  const pages = pagesToExport(board);
   if (!pages.length) throw new Error("no pages");
   let doc: InstanceType<typeof jsPDF> | null = null;
   for (let i = 0; i < pages.length; i++) {

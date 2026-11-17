@@ -1,14 +1,16 @@
 // Board canvas: rendering, Apple Pencil / mouse / touch input, pan & zoom, and all the tools
-// (pen, highlighter, disappearing ink, shapes + draw-and-hold recognition, stroke/partial eraser,
-// lasso select/move/resize, laser).
+// (pen, highlighter, shapes + draw-and-hold recognition, stroke/partial eraser,
+// lasso / rectangle select, move, resize, laser). All pages are stacked in one long, scrollable document.
 
 import { getStroke } from "perfect-freehand";
-import { applyMat, TEMP_FADE_MS, TEMP_HOLD_MS, type Board, type Mat } from "./board";
-import { uid, type Page, type Pt, type Stroke, type Tool, type Template } from "./model";
+import { applyMat, LASER_FADE_MS, LASER_HOLD_MS, TEMP_FADE_MS, TEMP_HOLD_MS, type Board, type LaserPt, type Mat, type ViewMsg } from "./board";
+import { uid, PAGE_W, type BoardState, type Page, type Pt, type Stroke, type Tool, type Template } from "./model";
 import { getBackground } from "./pdf";
 import { recognize } from "./recognize";
 
+/** "fade" (disappearing ink) has no button any more; peers' disappearing ink is still shown. */
 export type ViewTool = "pen" | "hl" | "fade" | "shape" | "eraser" | "lasso" | "laser" | "pan";
+export type LassoMode = "free" | "rect";
 export type ShapeKind = "line" | "arrow" | "rect" | "ellipse" | "tri";
 
 const PEN_GRACE_MS = 600;
@@ -18,6 +20,13 @@ const LASER_WINDOW_MS = 350;
 const HOLD_MS = 550;
 const HL_ALPHA = 0.35;
 const SEL_COLOR = "#2563eb";
+/** Two-finger tap: both fingers down and up within this time, each moving less than TAP_MOVE_PX. */
+const TAP_MS = 300;
+const TAP_MOVE_PX = 15;
+/** A second two-finger tap within this time of the first one undoes. */
+const DOUBLE_TAP_MS = 450;
+/** The second finger must land this soon after the first one for a two-finger tap. */
+const TAP_LAND_MS = 150;
 
 interface Drawable {
   tool: Tool;
@@ -26,7 +35,12 @@ interface Drawable {
   sp: boolean;
   dash?: boolean;
   pts: Pt[];
+  /** Version of the stroke's points / size (bumped by every move, resize or restyle). */
+  pv?: number;
 }
+
+/** Outline paths of freehand strokes, by stroke id, valid for one version of the stroke. */
+export type PathCache = Map<string, { pv: number; path: Path2D }>;
 
 function svgPath(points: number[][]): string {
   if (points.length < 4) return "";
@@ -83,13 +97,17 @@ export function shapePolyline(s: Drawable): [number, number][] {
   }
 }
 
-export function drawStroke(ctx: CanvasRenderingContext2D, s: Drawable, cache?: Map<string, Path2D>, id?: string, last = true) {
+export function drawStroke(ctx: CanvasRenderingContext2D, s: Drawable, cache?: PathCache, id?: string, last = true) {
   if (!s.pts.length) return;
   if ((s.tool === "pen" || s.tool === "hl") && !s.dash) {
-    let path = id ? cache?.get(id) : undefined;
+    // The cached outline is only valid for the version it was made from: a moved / resized
+    // stroke must never be drawn at its old place.
+    const pv = s.pv ?? 0;
+    const hit = id ? cache?.get(id) : undefined;
+    let path = hit && hit.pv === pv ? hit.path : undefined;
     if (!path) {
       path = freehandPath(s, last);
-      if (id && cache) cache.set(id, path);
+      if (id && cache) cache.set(id, { pv, path });
     }
     ctx.globalAlpha = s.tool === "hl" ? HL_ALPHA : 1;
     ctx.fillStyle = s.color;
@@ -259,6 +277,13 @@ export function renderPage(board: Pick<Board, "strokes">, page: Page, widthPx: n
   });
 }
 
+/** Space between pages in the continuous (notebook) layout, in page units. */
+export const PAGE_GAP = 24;
+const FIT_PAD = 12;
+/** A teacher's device sends its view at most this often while it moves, plus once when it settles. */
+const VIEW_SEND_MS = 60;
+const VIEW_SETTLE_MS = 160;
+
 export class BoardView {
   readonly el: HTMLDivElement;
   private base: HTMLCanvasElement;
@@ -271,15 +296,32 @@ export class BoardView {
   private cssW = 0;
   private cssH = 0;
   private scale = 1;
+  /** Offset of the document (all pages stacked) on screen, in CSS pixels. */
   private ox = 0;
   private oy = 0;
   private fit = true;
-  private pageId = "";
-  private paths = new Map<string, Path2D>();
+  private paths: PathCache = new Map();
   private baseDirty = true;
   private topDirty = true;
   private raf = 0;
   private pendingAdds: string[] = [];
+
+  // continuous layout: every live page stacked vertically
+  private layout = new Map<string, number>();
+  private layoutPages: Page[] = [];
+  private docW = PAGE_W;
+  private docH = 1;
+  private layoutDirty = true;
+  /** The board state object we laid out (a new one = a new board / lesson: start at page 1). */
+  private stateRef: BoardState | null = null;
+  private needsHome = true;
+  /** Version of the last "go" we scrolled to (scrolling ourselves doesn't change it). */
+  private goTs = -1;
+  private viewSentAt = 0;
+  private viewSettle: number | undefined;
+  private pendingView: { v: ViewMsg; at: number } | null = null;
+  /** The teacher's view we're showing, until this user moves the view themselves (kept across resizes). */
+  private followed: ViewMsg | null = null;
 
   tool: ViewTool = "pen";
   shape: ShapeKind = "line";
@@ -290,6 +332,8 @@ export class BoardView {
   /** Eraser radius in screen pixels (the same on every zoom level). */
   eraserPx = 18;
   laserDot = false;
+  /** Lasso: draw around the selection freehand, or drag a rectangle. */
+  lassoMode: LassoMode = "free";
   autoShape = true;
   /** Whether this user may draw right now (lock). */
   canDraw: () => boolean = () => true;
@@ -300,22 +344,39 @@ export class BoardView {
   private penActive = false;
   private penSeenAt = 0;
   private penMode = false;
-  private drawing: (Drawable & { id: string; page: string; kind: ViewTool; pointerId: number; sentUpTo: number; snapped: boolean; origin: [number, number] }) | null = null;
+  private drawing: (Drawable & {
+    id: string; page: string; kind: ViewTool; pointerId: number; sentUpTo: number; snapped: boolean; origin: [number, number];
+    /** Touch strokes are streamed only after a moment (a two-finger tap / pinch cancels them first). */
+    streamAt: number;
+    /** A snapped closed shape: moving the pen resizes it around its center (until the pen lifts). */
+    resize?: { cx: number; cy: number; d0: number; base: Pt[] };
+  }) | null = null;
   private holdTimer: number | undefined;
   private holdAnchor: [number, number] = [0, 0];
   private predicted: Pt[] = [];
+  /** last: previous eraser position in document units */
   private erasing: { pointerId: number; ids: Set<string>; added: string[]; last: [number, number] | null } | null = null;
-  private lasso: { pointerId: number; pts: [number, number][] } | null = null;
-  private sel: { ids: string[]; box: { x0: number; y0: number; x1: number; y1: number } } | null = null;
-  private selDrag: { pointerId: number; mode: "move" | "scale"; start: [number, number]; anchor: [number, number]; m: Mat; lastSent: number } | null = null;
+  /** rect: a rectangle from pts[0] to the last point instead of a freehand outline. */
+  private lasso: { pointerId: number; page: string; pts: [number, number][]; rect: boolean } | null = null;
+  private sel: { ids: string[]; page: string; box: { x0: number; y0: number; x1: number; y1: number } } | null = null;
+  private selDrag: { pointerId: number; mode: "move" | "scale"; start: [number, number]; anchor: [number, number]; m: Mat; lastSent: number; drag: { g: string; v: number } } | null = null;
   private touches = new Map<number, { x: number; y: number }>();
   private gesture: { startDist: number; startScale: number; cx: number; cy: number; ox: number; oy: number; px: number; py: number } | null = null;
   private panning: { pointerId: number; x: number; y: number; ox: number; oy: number } | null = null;
   private hover: { x: number; y: number; on: boolean } = { x: 0, y: 0, on: false };
   private spaceDown = false;
-  private laserQueued: { x: number; y: number } | null = null;
+  /** Laser samples since the last frame (all on one page, one segment, one hover state). */
+  private laserQueued: { page: string; pts: LaserPt[] } | null = null;
+  /** Laser segment: a new one starts at every press and when it ends (a hovering mouse after it). */
+  private laserSeg = 0;
+  /** Two-finger tap in progress (cleared as soon as it turns into a pinch / pan or a third finger). */
+  private tap: { t0: number; n: number; start: Map<number, { x: number; y: number }>; view: { scale: number; ox: number; oy: number; fit: boolean } } | null = null;
+  private lastTwoTap = 0;
+  private hint: HTMLDivElement;
+  private hintTimer: number | undefined;
   /** Where a hovering mouse last came to rest; the pointer only shows once it really moves. */
   private laserRest: { x: number; y: number; at: number } | null = null;
+  private laserDown: number | null = null;
 
   constructor(private board: Board) {
     this.el = document.createElement("div");
@@ -331,7 +392,10 @@ export class BoardView {
     this.privBadge.className = "priv-badge";
     this.privBadge.textContent = "🔒 דף פרטי: התלמיד לא רואה אותו";
     this.privBadge.hidden = true;
-    this.el.append(this.base, this.top, this.selMenu, this.privBadge);
+    this.hint = document.createElement("div");
+    this.hint.className = "board-hint";
+    this.hint.hidden = true;
+    this.el.append(this.base, this.top, this.selMenu, this.privBadge, this.hint);
     this.bctx = this.base.getContext("2d")!;
     this.tctx = this.top.getContext("2d", { desynchronized: true } as CanvasRenderingContext2DSettings)!;
     new ResizeObserver(() => this.resize()).observe(this.el);
@@ -343,7 +407,7 @@ export class BoardView {
     if (what === "side") return; // the side file is drawn by its own panel
     if (what === "lesson") {
       this.clearSelection();
-      this.pageId = ""; // re-fit on the new lesson's first page
+      this.needsHome = true; // start the new lesson at its first page
       what = "all";
     }
     if (what === "stroke" && strokeId) {
@@ -353,6 +417,7 @@ export class BoardView {
       return;
     }
     if (what === "all" || what === "page") {
+      this.layoutDirty = true;
       this.baseDirty = true;
       if (this.paths.size > 5000) this.paths.clear();
       if (this.sel) this.refreshSelection();
@@ -360,18 +425,83 @@ export class BoardView {
     this.topDirty = true;
   }
 
-  // ---------- view transform ----------
+  // ---------- layout ----------
+  /** The current page (the one at the center of the screen, or the one the teacher went to). */
   private get page(): Page {
     return this.board.currentPage;
   }
 
+  private ensureLayout() {
+    if (!this.layoutDirty) return;
+    this.layoutDirty = false;
+    // Keep what's on screen in place when pages are added / removed above it.
+    const anchor = this.board.state.current.page;
+    const before = this.layout.get(anchor);
+    const ps = this.board.pages;
+    this.layout.clear();
+    let y = 0, w = 1;
+    for (const p of ps) {
+      this.layout.set(p.id, y);
+      y += p.h + PAGE_GAP;
+      w = Math.max(w, p.w);
+    }
+    this.layoutPages = ps;
+    this.docH = Math.max(1, y - PAGE_GAP);
+    this.docW = w;
+    const after = this.layout.get(anchor);
+    if (before !== undefined && after !== undefined && before !== after && !this.needsHome) {
+      this.oy -= (after - before) * this.scale;
+      this.clampView();
+      this.baseDirty = this.topDirty = true;
+      this.placeSelMenu();
+    }
+  }
+
+  /** Top of a page in document units (undefined if it isn't on the board). */
+  private topOf(pageId: string): number | undefined {
+    this.ensureLayout();
+    return this.layout.get(pageId);
+  }
+
+  /** The page at a document y, or the nearest one (e.g. in the gap between two pages). */
+  private pageAtY(y: number): Page {
+    this.ensureLayout();
+    let best: Page | null = null, bd = Infinity;
+    for (const p of this.layoutPages) {
+      const t = this.layout.get(p.id)!;
+      const d = y < t ? t - y : y > t + p.h ? y - t - p.h : 0;
+      if (d < bd) { bd = d; best = p; }
+      if (d === 0 || t > y) break;
+    }
+    return best ?? this.board.currentPage;
+  }
+
+  /** Pages that are (at least partly) on screen. */
+  private visiblePages(): Page[] {
+    this.ensureLayout();
+    const y0 = -this.oy / this.scale, y1 = (this.cssH - this.oy) / this.scale;
+    return this.layoutPages.filter((p) => {
+      const t = this.layout.get(p.id)!;
+      return t < y1 && t + p.h > y0;
+    });
+  }
+
+  /** Where a page is on screen (CSS pixels relative to the board element); for the tests and overlays. */
+  pageRect(pageId = this.page.id): { x: number; y: number; w: number; h: number } | null {
+    const p = this.board.state.pages[pageId];
+    const t = this.topOf(pageId);
+    if (!p || t === undefined) return null;
+    return { x: this.ox, y: this.oy + t * this.scale, w: p.w * this.scale, h: p.h * this.scale };
+  }
+
+  // ---------- view transform ----------
   private resize() {
     const r = this.el.getBoundingClientRect();
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
-    // If the whole page was on screen before (not zoomed in), keep it whole in the new size,
-    // e.g. when the side file opens and the board gets narrower.
-    const p = this.page;
-    const wasWhole = this.cssW > 1 && p.w * this.scale <= this.cssW + 1 && p.h * this.scale <= this.cssH + 1;
+    // If the whole current page was on screen before (not zoomed in), keep it whole in the new
+    // size, e.g. when the side file opens and the board gets narrower.
+    const pr = this.cssW > 1 ? this.pageRect() : null;
+    const wasWhole = !!pr && pr.w <= this.cssW + 1 && pr.h <= this.cssH + 1;
     if (wasWhole) this.fit = true;
     this.cssW = Math.max(1, r.width);
     this.cssH = Math.max(1, r.height);
@@ -379,19 +509,31 @@ export class BoardView {
       c.width = Math.round(this.cssW * this.dpr);
       c.height = Math.round(this.cssH * this.dpr);
     }
-    if (this.fit) this.fitPage();
-    else this.clampView();
-    this.baseDirty = this.topDirty = true;
+    if (this.followed && !this.busy && this.board.followOn && this.layout.has(this.followed.page)) {
+      // Following the teacher: keep showing the same region when this window changes size.
+      this.applyRemoteView(this.followed);
+      return;
+    }
+    if (this.fit) this.fitTo(this.page);
+    this.viewChanged(false);
+    // The teacher's board changed size (e.g. a video tile was added): the student follows the new view.
+    if (this.cssW > 1) this.queueViewSend();
   }
 
-  fitPage() {
-    const p = this.page;
-    const pad = 12;
-    this.scale = Math.max(0.05, Math.min((this.cssW - pad * 2) / p.w, (this.cssH - pad * 2) / p.h));
+  /** Fit the page on screen (as wide as possible while the whole page fits), its top at the top. */
+  private fitTo(p: Page) {
+    this.ensureLayout();
+    const top = this.layout.get(p.id) ?? 0;
+    this.scale = Math.max(0.05, Math.min((this.cssW - FIT_PAD * 2) / p.w, (this.cssH - FIT_PAD * 2) / p.h));
     this.ox = (this.cssW - p.w * this.scale) / 2;
-    this.oy = (this.cssH - p.h * this.scale) / 2;
+    this.oy = this.docH * this.scale <= this.cssH ? (this.cssH - this.docH * this.scale) / 2 : FIT_PAD - top * this.scale;
     this.fit = true;
-    this.viewChanged();
+  }
+
+  /** "Fit to screen" (toolbar). */
+  fitPage() {
+    this.fitTo(this.page);
+    this.viewChanged(true);
   }
 
   zoomBy(f: number, cx = this.cssW / 2, cy = this.cssH / 2) {
@@ -401,22 +543,46 @@ export class BoardView {
     this.oy = cy - (cy - this.oy) * k;
     this.scale = ns;
     this.fit = false;
-    this.viewChanged();
+    this.viewChanged(true);
   }
 
-  /** Keeps the page on screen: scrolling, panning or zooming can never push it out of view. */
+  /** Keeps the board on screen: scrolling, panning or zooming can never push it out of view. */
   private clampView() {
     if (this.cssW <= 1 || this.cssH <= 1) return; // hidden (e.g. a shared screen is on stage)
-    const p = this.page;
-    this.ox = clampAxis(this.ox, p.w * this.scale, this.cssW);
-    this.oy = clampAxis(this.oy, p.h * this.scale, this.cssH);
+    this.ensureLayout();
+    this.ox = clampAxis(this.ox, this.docW * this.scale, this.cssW);
+    this.oy = clampAxis(this.oy, this.docH * this.scale, this.cssH);
   }
 
-  private viewChanged() {
+  /** user: the user moved the view here (not a page switch or the teacher's view arriving). */
+  private viewChanged(user: boolean) {
     this.clampView();
     this.baseDirty = this.topDirty = true;
+    if (user) {
+      this.pendingView = null;
+      this.followed = null;
+      this.updateCurrentFromCenter();
+      // While two fingers may still be a tap (undo), the view isn't sent: a tap puts it back.
+      if (!this.tap) this.queueViewSend();
+    }
     this.placeSelMenu();
     this.onViewChange();
+  }
+
+  /** Scrolling: the page at the center of the screen becomes the current one (on this device only). */
+  private updateCurrentFromCenter() {
+    if (this.cssW <= 1) return;
+    const p = this.pageAtY((this.cssH / 2 - this.oy) / this.scale);
+    if (p && p.id !== this.board.state.current.page) this.board.setCurrentLocal(p.id);
+  }
+
+  /** Brings a page into view after a page switch (toolbar, new page, imported file, the teacher). */
+  private showPage(p: Page) {
+    if (this.cssW <= 1) return;
+    if (this.fit) this.fitTo(p);
+    else this.oy = FIT_PAD - (this.topOf(p.id) ?? 0) * this.scale;
+    this.clearSelection();
+    this.viewChanged(false);
   }
 
   get zoomPct() {
@@ -424,31 +590,121 @@ export class BoardView {
   }
 
   /** Page units -> CSS pixels relative to the board element. */
-  toScreen(x: number, y: number): [number, number] {
-    return [this.ox + x * this.scale, this.oy + y * this.scale];
+  toScreen(x: number, y: number, pageId = this.sel?.page ?? this.page.id): [number, number] {
+    const t = this.topOf(pageId) ?? 0;
+    return [this.ox + x * this.scale, this.oy + (t + y) * this.scale];
   }
 
-  private toPage(clientX: number, clientY: number): [number, number] {
+  /** Client coordinates -> document units (all pages stacked). */
+  private toDoc(clientX: number, clientY: number): [number, number] {
     const r = this.el.getBoundingClientRect();
     return [(clientX - r.left - this.ox) / this.scale, (clientY - r.top - this.oy) / this.scale];
   }
 
-  /** Center of what's visible, in page units (where new things get inserted). */
+  /** Client coordinates -> units of the given page. */
+  private toLocal(clientX: number, clientY: number, pageId: string): [number, number] {
+    const [x, y] = this.toDoc(clientX, clientY);
+    return [x, y - (this.topOf(pageId) ?? 0)];
+  }
+
+  /** Center of what's visible, in units of the current page (where new things get inserted). */
   visibleCenter(): [number, number] {
     const p = this.page;
-    const cx = (this.cssW / 2 - this.ox) / this.scale, cy = (this.cssH / 2 - this.oy) / this.scale;
+    const t = this.topOf(p.id) ?? 0;
+    const cx = (this.cssW / 2 - this.ox) / this.scale, cy = (this.cssH / 2 - this.oy) / this.scale - t;
     return [Math.min(p.w - 50, Math.max(50, cx)), Math.min(p.h - 50, Math.max(50, cy))];
+  }
+
+  // ---------- following the teacher's view ----------
+  /** What this device shows, relative to the page at the center of the screen. */
+  viewMessage(): ViewMsg | null {
+    if (this.cssW <= 1 || this.cssH <= 1) return null;
+    const dx = (this.cssW / 2 - this.ox) / this.scale, dy = (this.cssH / 2 - this.oy) / this.scale;
+    const p = this.pageAtY(dy);
+    const t = this.layout.get(p.id) ?? 0;
+    const r = (n: number) => Math.round(n * 10) / 10;
+    return { page: p.id, cx: r(dx), cy: r(dy - t), w: r(this.cssW / this.scale), h: r(this.cssH / this.scale) };
+  }
+
+  /** Teacher's devices: send the view while it moves (throttled) and once more when it settles. */
+  private queueViewSend() {
+    if (!this.board.isStaff || !this.board.followOn) return;
+    const now = performance.now();
+    if (now - this.viewSentAt >= VIEW_SEND_MS) this.sendViewNow();
+    clearTimeout(this.viewSettle);
+    this.viewSettle = window.setTimeout(() => this.sendViewNow(), VIEW_SETTLE_MS);
+  }
+
+  /** Sends this device's view to everyone (or one peer that just connected). */
+  sendViewNow(peerId?: string) {
+    if (!peerId) this.viewSentAt = performance.now();
+    const m = this.viewMessage();
+    if (m) this.board.sendView(m, peerId);
+  }
+
+  /** True while the user is drawing, selecting or moving the board on this device. */
+  private get busy() {
+    return !!(this.drawing || this.lasso || this.selDrag || this.erasing || this.panning || this.gesture || this.touches.size);
+  }
+
+  /** Show the same part of the board as the teacher (never sent on: no loops). */
+  applyRemoteView(v: ViewMsg) {
+    if (this.busy) return;
+    const top = this.board.state === this.stateRef ? this.topOf(v.page) : undefined;
+    if (top === undefined || this.cssW <= 1 || this.cssH <= 1) {
+      // The page hasn't arrived yet (or the board is hidden): apply it when it can be.
+      this.pendingView = { v, at: performance.now() };
+      return;
+    }
+    this.pendingView = null;
+    this.followed = v;
+    // This is newer than a page switch that may still be waiting to be shown (e.g. from the snapshot).
+    this.needsHome = false;
+    this.goTs = this.board.state.current.ts;
+    this.scale = Math.max(0.1, Math.min(12, Math.min(this.cssW / v.w, this.cssH / v.h)));
+    this.ox = this.cssW / 2 - v.cx * this.scale;
+    this.oy = this.cssH / 2 - (top + v.cy) * this.scale;
+    this.fit = false;
+    this.board.setCurrentLocal(v.page);
+    this.viewChanged(false);
   }
 
   // ---------- rendering ----------
   private loop = () => {
     this.raf = requestAnimationFrame(this.loop);
-    if (this.board.currentPage.id !== this.pageId) {
-      this.pageId = this.board.currentPage.id;
+    if (this.board.state !== this.stateRef) {
+      // A different board: loaded from storage, or a new lesson.
+      this.stateRef = this.board.state;
+      this.layoutDirty = true;
+      this.needsHome = true;
       this.clearSelection();
-      this.fitPage();
-      this.privBadge.hidden = !this.page.priv;
     }
+    this.ensureLayout();
+    if (this.needsHome && this.cssW > 1 && this.followed && this.layout.has(this.followed.page)) {
+      // The board was (re)loaded while following the teacher: stay on the teacher's view.
+      this.needsHome = false;
+      this.applyRemoteView(this.followed);
+    } else if (this.needsHome && this.cssW > 1) {
+      // Opening a board: show its first page.
+      this.needsHome = false;
+      this.goTs = this.board.state.current.ts;
+      const first = this.board.pages[0];
+      if (first) {
+        this.board.setCurrentLocal(first.id);
+        this.fitTo(first);
+      }
+      this.viewChanged(false);
+    } else if (this.board.state.current.ts !== this.goTs && this.cssW > 1) {
+      // Someone went to a page (toolbar, new page, imported file, the teacher's other device).
+      this.goTs = this.board.state.current.ts;
+      this.showPage(this.page);
+    }
+    if (this.pendingView) {
+      if (performance.now() - this.pendingView.at > 10_000) this.pendingView = null;
+      else if (this.layout.has(this.pendingView.v.page) && this.cssW > 1) this.applyRemoteView(this.pendingView.v);
+    }
+    const priv = !!this.page.priv;
+    if (this.privBadge.hidden === priv) this.privBadge.hidden = !priv;
     if (this.board.tick(performance.now()) || this.board.lasers.size) this.topDirty = true;
     this.flushLive();
     if (this.baseDirty) {
@@ -460,11 +716,21 @@ export class BoardView {
 
   destroy() {
     cancelAnimationFrame(this.raf);
+    clearTimeout(this.viewSettle);
   }
 
-  private applyTransform(ctx: CanvasRenderingContext2D) {
+  /** Document transform, shifted down to a page's top (page units from there on). */
+  private applyTransform(ctx: CanvasRenderingContext2D, top = 0) {
     const k = this.dpr * this.scale;
-    ctx.setTransform(k, 0, 0, k, this.dpr * this.ox, this.dpr * this.oy);
+    ctx.setTransform(k, 0, 0, k, this.dpr * this.ox, this.dpr * (this.oy + top * this.scale));
+  }
+
+  /** Sets the transform for drawing on a page; false if that page isn't on the board. */
+  private onPage(ctx: CanvasRenderingContext2D, pageId: string): boolean {
+    const t = this.layout.get(pageId);
+    if (t === undefined) return false;
+    this.applyTransform(ctx, t);
+    return true;
   }
 
   /** Strokes not drawn on the base layer because they're being moved (by us or a peer). */
@@ -477,66 +743,73 @@ export class BoardView {
   private drawBase() {
     this.baseDirty = false;
     const ctx = this.bctx;
-    const p = this.page;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.base.width, this.base.height);
-    this.applyTransform(ctx);
-    ctx.shadowColor = "rgba(0,0,0,0.18)";
-    ctx.shadowBlur = 12;
-    ctx.fillStyle = "#fff";
-    ctx.fillRect(0, 0, p.w, p.h);
-    ctx.shadowBlur = 0;
-    ctx.shadowColor = "transparent";
-    drawTemplate(ctx, p, this.scale);
-    if (p.bg) {
-      const img = getBackground(p.bg, p.w * this.scale * this.dpr, () => { this.baseDirty = true; });
-      if (img) ctx.drawImage(img, 0, 0, p.w, p.h);
-      else {
-        ctx.fillStyle = "#94a3b8";
-        ctx.font = "24px system-ui";
-        ctx.textAlign = "center";
-        ctx.fillText("טוען את הקובץ…", p.w / 2, p.h / 2);
-      }
+    const pages = this.visiblePages();
+    if (!pages.length) return;
+    // Group the ink of the visible pages in one pass over all strokes.
+    const byPage = new Map<string, Stroke[]>(pages.map((p) => [p.id, []]));
+    for (const s of Object.values(this.board.state.strokes)) {
+      if (!s.del) byPage.get(s.page)?.push(s);
     }
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, p.w, p.h);
-    ctx.clip();
     const hidden = this.hiddenIds();
-    for (const s of this.board.strokes(p.id)) if (!hidden.has(s.id)) drawStroke(ctx, s, this.paths, s.id);
-    ctx.restore();
+    for (const p of pages) {
+      this.onPage(ctx, p.id);
+      ctx.shadowColor = "rgba(0,0,0,0.18)";
+      ctx.shadowBlur = 12;
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, p.w, p.h);
+      ctx.shadowBlur = 0;
+      ctx.shadowColor = "transparent";
+      drawTemplate(ctx, p, this.scale);
+      if (p.bg) {
+        const img = getBackground(p.bg, p.w * this.scale * this.dpr, () => { this.baseDirty = true; });
+        if (img) ctx.drawImage(img, 0, 0, p.w, p.h);
+        else {
+          ctx.fillStyle = "#94a3b8";
+          ctx.font = "24px system-ui";
+          ctx.textAlign = "center";
+          ctx.fillText("טוען את הקובץ…", p.w / 2, p.h / 2);
+        }
+      }
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, p.w, p.h);
+      ctx.clip();
+      const list = byPage.get(p.id)!.sort((a, b) => a.ts - b.ts || (a.id < b.id ? -1 : 1));
+      for (const s of list) if (!hidden.has(s.id)) drawStroke(ctx, s, this.paths, s.id);
+      ctx.restore();
+    }
   }
 
   private drawAdds() {
     const ctx = this.bctx;
-    const p = this.page;
-    this.applyTransform(ctx);
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, p.w, p.h);
-    ctx.clip();
     for (const id of this.pendingAdds) {
       const s = this.board.state.strokes[id];
-      if (s && !s.del && s.page === p.id) drawStroke(ctx, s, this.paths, s.id);
+      const p = s && this.board.state.pages[s.page];
+      if (!s || s.del || !p || !this.onPage(ctx, s.page)) continue;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, p.w, p.h);
+      ctx.clip();
+      drawStroke(ctx, s, this.paths, s.id);
+      ctx.restore();
     }
-    ctx.restore();
     this.pendingAdds = [];
   }
 
   private drawTop() {
     this.topDirty = false;
     const ctx = this.tctx;
-    const p = this.page;
     const now = performance.now();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.top.width, this.top.height);
-    this.applyTransform(ctx);
 
     // strokes being moved: by us (lasso drag) or by a peer (preview transform)
     const moved: [Stroke, Mat][] = [];
     for (const [id, m] of this.board.previews) {
       const s = this.board.state.strokes[id];
-      if (s && !s.del && s.page === p.id) moved.push([s, m]);
+      if (s && !s.del) moved.push([s, m]);
     }
     if (this.selDrag && this.sel) {
       for (const id of this.sel.ids) {
@@ -545,61 +818,56 @@ export class BoardView {
       }
     }
     for (const [s, m] of moved) {
+      if (!this.onPage(ctx, s.page)) continue;
       ctx.save();
       ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
-      drawStroke(ctx, s);
+      // The cached outline under the drag's matrix: no perfect-freehand work on every frame.
+      drawStroke(ctx, s, this.paths, s.id);
       ctx.restore();
     }
 
     for (const ls of this.board.live.values()) {
       // A live stroke can have a hole where a packet is still on its way; draw what arrived.
-      if (ls.page === p.id) drawStroke(ctx, { ...ls, pts: ls.pts.filter(Boolean) }, undefined, undefined, false);
+      if (this.onPage(ctx, ls.page)) drawStroke(ctx, { ...ls, pts: ls.pts.filter(Boolean) }, undefined, undefined, false);
     }
     for (const t of this.board.temps.values()) {
-      if (t.s.page !== p.id) continue;
+      if (!this.onPage(ctx, t.s.page)) continue;
       const age = now - t.at;
       const alpha = age < TEMP_HOLD_MS ? 1 : Math.max(0, 1 - (age - TEMP_HOLD_MS) / TEMP_FADE_MS);
       ctx.globalAlpha = alpha;
       drawStroke(ctx, t.s);
       ctx.globalAlpha = 1;
     }
-    if (this.drawing && this.drawing.page === p.id) {
+    if (this.drawing && this.onPage(ctx, this.drawing.page)) {
       const d = this.drawing;
       const pts = !isShape(d.tool) && !d.snapped ? d.pts.concat(this.predicted) : d.pts;
       drawStroke(ctx, { ...d, pts }, undefined, undefined, false);
     }
     // lasers
     for (const l of this.board.lasers.values()) {
-      if (l.page !== p.id || !l.trail.length) continue;
-      if (!l.dot) {
-        for (let i = 1; i < l.trail.length; i++) {
-          const a = l.trail[i - 1], b = l.trail[i];
-          const age = Math.min(1, (now - b.at) / 900);
-          ctx.strokeStyle = `rgba(239,68,68,${(1 - age) * 0.8})`;
-          ctx.lineWidth = 6 / this.scale;
-          ctx.lineCap = "round";
-          ctx.beginPath();
-          ctx.moveTo(a.x, a.y);
-          ctx.lineTo(b.x, b.y);
-          ctx.stroke();
-        }
+      if (!this.onPage(ctx, l.page)) continue;
+      if (!l.dot) this.drawLaserTrail(ctx, l.trail, now);
+      // The red dot: in dot mode, or where a hovering pointer is (so the student sees where it
+      // points). While a trail is being drawn only the trail shows.
+      if (l.head.show) {
+        const h = l.head;
+        const r = (l.dot ? 9 : 6) / this.scale;
+        ctx.fillStyle = "rgba(239,68,68,0.25)";
+        ctx.beginPath();
+        ctx.arc(h.x, h.y, r * 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "rgba(239,68,68,0.95)";
+        ctx.beginPath();
+        ctx.arc(h.x, h.y, r, 0, Math.PI * 2);
+        ctx.fill();
       }
-      const h = l.trail[l.trail.length - 1];
-      const r = (l.dot ? 9 : 7) / this.scale;
-      ctx.fillStyle = "rgba(239,68,68,0.25)";
-      ctx.beginPath();
-      ctx.arc(h.x, h.y, r * 2, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = "rgba(239,68,68,0.95)";
-      ctx.beginPath();
-      ctx.arc(h.x, h.y, r, 0, Math.PI * 2);
-      ctx.fill();
     }
     // lasso outline
-    if (this.lasso && this.lasso.pts.length > 1) {
+    if (this.lasso && this.lasso.pts.length > 1 && this.onPage(ctx, this.lasso.page)) {
+      const poly = this.lassoPoly(this.lasso);
       ctx.beginPath();
-      ctx.moveTo(this.lasso.pts[0][0], this.lasso.pts[0][1]);
-      for (const [x, y] of this.lasso.pts) ctx.lineTo(x, y);
+      ctx.moveTo(poly[0][0], poly[0][1]);
+      for (const [x, y] of poly) ctx.lineTo(x, y);
       ctx.closePath();
       ctx.fillStyle = "rgba(37,99,235,0.06)";
       ctx.fill();
@@ -610,7 +878,7 @@ export class BoardView {
       ctx.setLineDash([]);
     }
     // selection box + handles
-    if (this.sel) {
+    if (this.sel && this.onPage(ctx, this.sel.page)) {
       const b = this.selBoxNow();
       ctx.strokeStyle = SEL_COLOR;
       ctx.lineWidth = 1.5 / this.scale;
@@ -626,9 +894,10 @@ export class BoardView {
         ctx.stroke();
       }
     }
-    // hover cursor
+    // hover cursor (document units)
     if (this.hover.on && !this.drawing && !this.lasso) {
-      const [x, y] = this.toPage(this.hover.x, this.hover.y);
+      this.applyTransform(ctx);
+      const [x, y] = this.toDoc(this.hover.x, this.hover.y);
       ctx.beginPath();
       if (this.tool === "eraser") {
         ctx.arc(x, y, this.eraserRadius(), 0, Math.PI * 2);
@@ -647,15 +916,89 @@ export class BoardView {
     return this.eraserPx / this.scale;
   }
 
+  /**
+   * A laser trail: smooth curves (through the midpoints) joining only the points of the same
+   * segment. Each point stays for LASER_HOLD_MS, then fades; points of about the same opacity are
+   * drawn as one path, so the trail has no darker beads where pieces overlap.
+   */
+  private drawLaserTrail(ctx: CanvasRenderingContext2D, trail: { x: number; y: number; at: number; seg: number }[], now: number) {
+    const LEVELS = 8;
+    const level = (at: number) => {
+      const age = now - at;
+      if (age <= LASER_HOLD_MS) return LEVELS;
+      return Math.max(0, Math.ceil(LEVELS * (1 - (age - LASER_HOLD_MS) / LASER_FADE_MS)));
+    };
+    const paths = new Map<number, Path2D>();
+    const pathFor = (lv: number) => {
+      let p = paths.get(lv);
+      if (!p) paths.set(lv, (p = new Path2D()));
+      return p;
+    };
+    const w = 7 / this.scale;
+    let i = 0;
+    while (i < trail.length) {
+      let j = i;
+      while (j + 1 < trail.length && trail[j + 1].seg === trail[i].seg) j++;
+      const run = trail.slice(i, j + 1);
+      i = j + 1;
+      if (run.length === 1) {
+        const lv = level(run[0].at);
+        if (lv) {
+          const p = pathFor(lv);
+          p.moveTo(run[0].x, run[0].y);
+          p.lineTo(run[0].x + 0.01, run[0].y); // a dot (round caps)
+        }
+        continue;
+      }
+      const mid = (a: { x: number; y: number }, b: { x: number; y: number }) => [(a.x + b.x) / 2, (a.y + b.y) / 2];
+      for (let k = 0; k < run.length - 1; k++) {
+        // Piece k: from the midpoint before point k (or the start) to the midpoint after it,
+        // curving through point k.
+        const lv = level(run[k + 1].at);
+        if (!lv) continue;
+        const p = pathFor(lv);
+        const a = run[k], b = run[k + 1];
+        if (k === 0) {
+          const [mx, my] = run.length === 2 ? [b.x, b.y] : mid(a, b);
+          p.moveTo(a.x, a.y);
+          p.lineTo(mx, my);
+        } else {
+          const [sx, sy] = mid(run[k - 1], a);
+          const [ex, ey] = k === run.length - 2 ? [b.x, b.y] : mid(a, b);
+          p.moveTo(sx, sy);
+          p.quadraticCurveTo(a.x, a.y, ex, ey);
+        }
+      }
+    }
+    ctx.save();
+    ctx.lineWidth = w;
+    ctx.lineCap = ctx.lineJoin = "round";
+    for (const [lv, p] of paths) {
+      const alpha = (0.85 * lv) / LEVELS;
+      ctx.strokeStyle = `rgba(239,68,68,${alpha})`;
+      ctx.stroke(p);
+    }
+    ctx.restore();
+  }
+
+  /** The lasso as a closed polygon (a rectangle in rectangle mode). */
+  private lassoPoly(l: NonNullable<BoardView["lasso"]>): [number, number][] {
+    if (!l.rect) return l.pts;
+    const [x0, y0] = l.pts[0], [x1, y1] = l.pts[l.pts.length - 1];
+    return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  }
+
   // ---------- selection ----------
   get selection(): string[] {
     return this.sel?.ids ?? [];
   }
 
   select(ids: string[]) {
-    const strokes = ids.map((id) => this.board.state.strokes[id]).filter((s): s is Stroke => !!s && !s.del);
+    const all = ids.map((id) => this.board.state.strokes[id]).filter((s): s is Stroke => !!s && !s.del);
+    // A selection lives on one page.
+    const strokes = all.filter((s) => s.page === all[0]?.page);
     if (!strokes.length) return this.clearSelection();
-    this.sel = { ids: strokes.map((s) => s.id), box: bboxOf(strokes) };
+    this.sel = { ids: strokes.map((s) => s.id), page: strokes[0].page, box: bboxOf(strokes) };
     this.topDirty = true;
     this.placeSelMenu();
     this.onSelectionChange();
@@ -696,14 +1039,16 @@ export class BoardView {
       return;
     }
     const b = this.selBoxNow();
+    const oy = this.oy + (this.topOf(this.sel.page) ?? 0) * this.scale;
     const left = this.ox + ((b.x0 + b.x1) / 2) * this.scale;
-    let top = this.oy + b.y0 * this.scale - 52;
-    if (top < 4) top = this.oy + b.y1 * this.scale + 12;
+    let top = oy + b.y0 * this.scale - 52;
+    if (top < 4) top = oy + b.y1 * this.scale + 12;
     this.selMenu.hidden = !!this.selDrag;
     this.selMenu.style.left = `${Math.max(8, Math.min(this.cssW - 8, left))}px`;
     this.selMenu.style.top = `${Math.max(4, Math.min(this.cssH - 50, top))}px`;
   }
 
+  /** x, y in units of the selection's page. */
   private selHit(x: number, y: number): "move" | [number, number] | null {
     if (!this.sel) return null;
     const b = this.sel.box;
@@ -769,7 +1114,7 @@ export class BoardView {
         this.ox -= e.shiftKey && !dx ? dy : dx;
         this.oy -= e.shiftKey && !dx ? 0 : dy;
         this.fit = false;
-        this.viewChanged();
+        this.viewChanged(true);
       }
     }, { passive: false });
     window.addEventListener("keydown", (e) => {
@@ -799,6 +1144,8 @@ export class BoardView {
 
   duplicateSelection() {
     if (!this.sel) return;
+    // Duplicate on the selection's page (the current page may be another one after scrolling).
+    if (this.sel.page !== this.board.state.current.page) this.board.setCurrentLocal(this.sel.page);
     this.board.copy(this.sel.ids);
     this.select(this.board.paste());
   }
@@ -827,6 +1174,7 @@ export class BoardView {
       // Palm rejection: ignore touches while / right after the Pencil is used.
       if (this.penActive || performance.now() - this.penSeenAt < PEN_GRACE_MS) return;
       this.touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      this.tapDown(e);
       if (this.touches.size >= 2) {
         this.cancelDrawing();
         this.panning = null;
@@ -847,31 +1195,40 @@ export class BoardView {
     e.preventDefault();
     (document.activeElement as HTMLElement | null)?.blur?.();
     try { this.top.setPointerCapture(e.pointerId); } catch { /* ignore */ }
-    const [x, y] = this.toPage(e.clientX, e.clientY);
+    // The page under the pointer (or the nearest one): the whole stroke / lasso stays on it.
+    const [dx, dy] = this.toDoc(e.clientX, e.clientY);
+    const pg = this.pageAtY(dy);
+    const x = dx, y = dy - (this.layout.get(pg.id) ?? 0);
 
     // The eraser end / eraser button of a Windows stylus (Lenovo, Surface) erases whatever tool is selected.
     const penEraser = e.pointerType === "pen" && (e.buttons & 32) !== 0;
     if (this.tool === "laser" && !penEraser) {
-      this.laserQueued = { x, y };
+      // Every press starts a new piece of trail: it's never joined to the previous one.
+      this.laserSeg++;
+      this.laserDown = e.pointerId;
+      this.queueLaser(pg.id, { x, y, seg: this.laserSeg });
       return;
     }
     if (this.tool === "lasso" && !penEraser) {
-      const hit = this.selHit(x, y);
+      const sp = this.sel?.page;
+      const [sx, sy] = sp ? this.toLocal(e.clientX, e.clientY, sp) : [x, y];
+      const hit = this.selHit(sx, sy);
       if (hit) {
-        const anchor: [number, number] = hit === "move" ? [x, y] : hit;
-        this.selDrag = { pointerId: e.pointerId, mode: hit === "move" ? "move" : "scale", start: [x, y], anchor, m: [1, 0, 0, 1, 0, 0], lastSent: 0 };
+        const anchor: [number, number] = hit === "move" ? [sx, sy] : hit;
+        const drag = { g: uid(), v: this.board.state.strokes[this.sel!.ids[0]]?.pv ?? 0 };
+        this.selDrag = { pointerId: e.pointerId, mode: hit === "move" ? "move" : "scale", start: [sx, sy], anchor, m: [1, 0, 0, 1, 0, 0], lastSent: 0, drag };
         this.selMenu.hidden = true;
         this.baseDirty = this.topDirty = true;
         return;
       }
       this.clearSelection();
-      this.lasso = { pointerId: e.pointerId, pts: [[x, y]] };
+      this.lasso = { pointerId: e.pointerId, page: pg.id, pts: [[x, y]], rect: this.lassoMode === "rect" };
       return;
     }
     if (this.sel) this.clearSelection();
     if (this.tool === "eraser" || penEraser) {
       this.erasing = { pointerId: e.pointerId, ids: new Set(), added: [], last: null };
-      this.eraseAt(x, y);
+      this.eraseAt(dx, dy);
       return;
     }
     const pressure = e.pointerType === "pen" ? e.pressure || 0.5 : 0.5;
@@ -880,7 +1237,7 @@ export class BoardView {
     if (kind === "shape") tool = this.shape === "tri" ? "poly" : this.shape;
     this.drawing = {
       id: uid(),
-      page: this.page.id,
+      page: pg.id,
       kind,
       tool,
       color: this.color,
@@ -892,6 +1249,7 @@ export class BoardView {
       sentUpTo: 0,
       snapped: false,
       origin: [x, y],
+      streamAt: e.pointerType === "touch" ? performance.now() + 120 : 0,
     };
     this.armHold(e.clientX, e.clientY);
     this.topDirty = true;
@@ -913,8 +1271,18 @@ export class BoardView {
         if (r.tool !== "line") return;
         cur.pts = r.pts.map((p) => [p[0], p[1], 0.5] as Pt);
       } else {
+        const pen = cur.pts[cur.pts.length - 1];
         cur.tool = r.tool;
         cur.pts = r.pts;
+        if (r.tool === "ellipse" || r.tool === "rect" || r.tool === "poly") {
+          // Like Apple Notes: while the pen stays down, moving it resizes the shape around its
+          // center, by how much farther from the center the pen is than when the shape snapped.
+          let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+          for (const [px, py] of r.pts) { x0 = Math.min(x0, px); y0 = Math.min(y0, py); x1 = Math.max(x1, px); y1 = Math.max(y1, py); }
+          const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+          const d0 = Math.hypot(pen[0] - cx, pen[1] - cy);
+          if (d0 > 8) cur.resize = { cx, cy, d0, base: r.pts.map((q) => [q[0], q[1], q[2]] as Pt) };
+        }
       }
       cur.snapped = true;
       this.predicted = [];
@@ -926,6 +1294,7 @@ export class BoardView {
   private move(e: PointerEvent) {
     if (e.pointerType === "touch" && this.touches.has(e.pointerId)) {
       this.touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      this.tapMove(e);
       if (this.gesture) {
         this.updateGesture();
         return;
@@ -935,22 +1304,32 @@ export class BoardView {
       this.ox = this.panning.ox + (e.clientX - this.panning.x);
       this.oy = this.panning.oy + (e.clientY - this.panning.y);
       this.fit = false;
-      this.viewChanged();
+      this.viewChanged(true);
       return;
     }
     if (e.pointerType !== "touch") {
       this.hover = { x: e.clientX, y: e.clientY, on: true };
       this.topDirty = true;
     }
-    const [x, y] = this.toPage(e.clientX, e.clientY);
     if (this.tool === "laser" && (e.buttons || e.pointerType === "pen" || e.pointerType === "mouse")) {
       // The laser follows the mouse / Pencil hover even without pressing, but only once the user
       // actually moves it (a resting or slightly bumped mouse shows nothing).
-      if (e.buttons || this.laserMoved(e.clientX, e.clientY)) this.laserQueued = { x, y };
+      if (e.buttons || this.laserMoved(e.clientX, e.clientY)) {
+        // Pressed: a trail. A hovering mouse: a trail and the dot. A hovering Pencil: only the dot.
+        const hover = !e.buttons;
+        const noTrail = hover && e.pointerType === "pen";
+        const evs = !hover ? (e.getCoalescedEvents?.() ?? [e]) : [e];
+        for (const ev of evs.length ? evs : [e]) {
+          const [dx, dy] = this.toDoc(ev.clientX, ev.clientY);
+          const pg = this.pageAtY(dy);
+          this.queueLaser(pg.id, { x: dx, y: dy - (this.layout.get(pg.id) ?? 0), seg: this.laserSeg, hover, noTrail });
+        }
+      }
       return;
     }
-    if (this.selDrag && this.selDrag.pointerId === e.pointerId) {
+    if (this.selDrag && this.selDrag.pointerId === e.pointerId && this.sel) {
       const g = this.selDrag;
+      const [x, y] = this.toLocal(e.clientX, e.clientY, this.sel.page);
       if (g.mode === "move") {
         g.m = [1, 0, 0, 1, x - g.start[0], y - g.start[1]];
       } else {
@@ -963,38 +1342,47 @@ export class BoardView {
       return;
     }
     if (this.lasso && this.lasso.pointerId === e.pointerId) {
-      const evs = e.getCoalescedEvents?.() ?? [e];
-      for (const ev of evs) this.lasso.pts.push(this.toPage(ev.clientX, ev.clientY));
+      if (this.lasso.rect) this.lasso.pts = [this.lasso.pts[0], this.toLocal(e.clientX, e.clientY, this.lasso.page)];
+      else {
+        const evs = e.getCoalescedEvents?.() ?? [e];
+        for (const ev of evs) this.lasso.pts.push(this.toLocal(ev.clientX, ev.clientY, this.lasso.page));
+      }
       this.topDirty = true;
       return;
     }
     if (this.erasing && this.erasing.pointerId === e.pointerId) {
       const evs = e.getCoalescedEvents?.() ?? [e];
       for (const ev of evs) {
-        const [ex, ey] = this.toPage(ev.clientX, ev.clientY);
+        const [ex, ey] = this.toDoc(ev.clientX, ev.clientY);
         this.eraseAt(ex, ey);
       }
       return;
     }
     const d = this.drawing;
     if (!d || d.pointerId !== e.pointerId) return;
+    const [x, y] = this.toLocal(e.clientX, e.clientY, d.page);
     if (Math.hypot(e.clientX - this.holdAnchor[0], e.clientY - this.holdAnchor[1]) > 4) this.armHold(e.clientX, e.clientY);
     if (d.snapped) {
-      // After snapping, a line keeps following the pen so its end can be adjusted.
-      if (d.pts.length === 2 && (d.tool === "line" || d.tool === "hl")) d.pts[1] = [x, y, 0.5];
+      // After snapping, a line keeps following the pen so its end can be adjusted, and a closed
+      // shape grows / shrinks around its center with the pen.
+      if (d.resize) {
+        const { cx, cy, d0, base } = d.resize;
+        const k = Math.max(0.05, Math.min(20, Math.hypot(x - cx, y - cy) / d0));
+        d.pts = base.map((q) => [Math.round((cx + (q[0] - cx) * k) * 10) / 10, Math.round((cy + (q[1] - cy) * k) * 10) / 10, q[2]] as Pt);
+      } else if (d.pts.length === 2 && (d.tool === "line" || d.tool === "hl")) d.pts[1] = [x, y, 0.5];
       this.topDirty = true;
       return;
     }
     const evs = e.getCoalescedEvents?.() ?? [e];
     const shape = d.kind === "shape";
     for (const ev of evs.length ? evs : [e]) {
-      const [px, py] = this.toPage(ev.clientX, ev.clientY);
+      const [px, py] = this.toLocal(ev.clientX, ev.clientY, d.page);
       const pr = ev.pointerType === "pen" ? ev.pressure || 0.5 : 0.5;
       if (shape) this.shapeTo(d, px, py, ev.shiftKey);
       else d.pts.push([px, py, pr]);
     }
     this.predicted = shape ? [] : (e.getPredictedEvents?.() ?? []).slice(0, 2).map((ev) => {
-      const [px, py] = this.toPage(ev.clientX, ev.clientY);
+      const [px, py] = this.toLocal(ev.clientX, ev.clientY, d.page);
       return [px, py, ev.pressure || 0.5] as Pt;
     });
     this.topDirty = true;
@@ -1037,8 +1425,14 @@ export class BoardView {
       this.penActive = false;
       this.penSeenAt = performance.now();
     }
+    if (this.laserDown === e.pointerId) {
+      // The press ended: a hovering mouse after it draws its own, separate piece of trail.
+      this.laserDown = null;
+      this.laserSeg++;
+    }
     if (e.pointerType === "touch") {
-      this.touches.delete(e.pointerId);
+      const had = this.touches.delete(e.pointerId);
+      if (had && !this.touches.size && this.tap) this.tapEnd(cancelled);
       if (this.gesture && this.touches.size < 2) {
         this.gesture = null;
         const rest = [...this.touches.entries()][0];
@@ -1055,19 +1449,26 @@ export class BoardView {
       const ids = this.sel!.ids;
       this.selDrag = null;
       const moved = Math.abs(g.m[4]) > 0.5 || Math.abs(g.m[5]) > 0.5 || Math.abs(g.m[0] - 1) > 0.005;
-      if (moved && !cancelled) this.board.transformStrokes(ids, g.m);
-      this.board.previewTransform(ids, null);
+      // Even when the system cancels the pointer (iOS can cancel the Pencil mid-drag), keep the
+      // move the user made: it is on screen already.
+      if (moved) this.board.transformStrokes(ids, g.m);
+      this.board.previewTransform(ids, null, g.drag);
       this.baseDirty = true;
       this.select(ids);
       return;
     }
     if (this.lasso && this.lasso.pointerId === e.pointerId) {
-      const poly = this.lasso.pts;
+      const l = this.lasso;
+      const poly = this.lassoPoly(l);
+      const page = l.page;
       this.lasso = null;
       this.topDirty = true;
-      if (poly.length < 3) return;
+      if (l.rect) {
+        const [a, b] = [poly[0], poly[2]];
+        if (Math.abs(a[0] - b[0]) < 2 || Math.abs(a[1] - b[1]) < 2) return;
+      } else if (poly.length < 3) return;
       const ids: string[] = [];
-      for (const s of this.board.strokes(this.page.id)) {
+      for (const s of this.board.strokes(page)) {
         const pts = isShape(s.tool) ? shapePolyline(s) : s.pts.map((p) => [p[0], p[1]] as [number, number]);
         const inside = pts.filter(([x, y]) => pointInPoly(x, y, poly)).length;
         if (pts.length && inside / pts.length >= 0.5) ids.push(s.id);
@@ -1136,9 +1537,10 @@ export class BoardView {
     this.ox = g.cx - (g.cx - g.ox) * k + (mx - g.px);
     this.oy = g.cy - (g.cy - g.oy) * k + (my - g.py);
     this.fit = false;
-    this.viewChanged();
+    this.viewChanged(true);
   }
 
+  /** x, y in document units: the eraser works on whichever page is under each sample. */
   private eraseAt(x: number, y: number) {
     const er = this.erasing;
     if (!er) return;
@@ -1148,10 +1550,22 @@ export class BoardView {
     er.last = [x, y];
     const dist = Math.hypot(x - from[0], y - from[1]);
     const steps = Math.max(1, Math.ceil(dist / (r * 0.75)));
-    const samples: [number, number][] = [];
-    for (let i = 1; i <= steps; i++) samples.push([from[0] + ((x - from[0]) * i) / steps, from[1] + ((y - from[1]) * i) / steps]);
+    const byPage = new Map<string, [number, number][]>();
+    for (let i = 1; i <= steps; i++) {
+      const sx = from[0] + ((x - from[0]) * i) / steps, sy = from[1] + ((y - from[1]) * i) / steps;
+      const pg = this.pageAtY(sy);
+      const t = this.layout.get(pg.id) ?? 0;
+      if (sy < t - r || sy > t + pg.h + r) continue; // in the gap between pages
+      let list = byPage.get(pg.id);
+      if (!list) byPage.set(pg.id, (list = []));
+      list.push([sx, sy - t]);
+    }
+    for (const [pageId, samples] of byPage) this.eraseOnPage(er, pageId, samples, r);
+  }
+
+  private eraseOnPage(er: NonNullable<BoardView["erasing"]>, pageId: string, samples: [number, number][], r: number) {
     const hits: Stroke[] = [];
-    for (const s of this.board.strokes(this.page.id)) {
+    for (const s of this.board.strokes(pageId)) {
       if (er.ids.has(s.id)) continue;
       if (samples.some(([sx, sy]) => hitStroke(s, sx, sy, r))) hits.push(s);
     }
@@ -1187,7 +1601,7 @@ export class BoardView {
   /** Once per frame: stream the stroke being drawn, the lasso drag, and the laser position. */
   private flushLive() {
     const d = this.drawing;
-    if (d) {
+    if (d && performance.now() >= d.streamAt) {
       const meta = { id: d.id, page: d.page, tool: d.tool, color: d.color, size: d.size, sp: d.sp, dash: d.dash };
       if (d.kind === "shape" || d.snapped) {
         if (d.pts.length >= 2) this.board.sendLive(meta, d.pts, true);
@@ -1201,14 +1615,92 @@ export class BoardView {
     const g = this.selDrag;
     if (g && this.sel && performance.now() - g.lastSent > 50) {
       g.lastSent = performance.now();
-      this.board.previewTransform(this.sel.ids, g.m);
+      this.board.previewTransform(this.sel.ids, g.m, g.drag);
     }
-    if (this.laserQueued) {
-      this.board.laser(this.laserQueued.x, this.laserQueued.y, this.laserDot);
-      this.laserQueued = null;
+    this.sendLaser();
+  }
+
+  private sendLaser() {
+    const q = this.laserQueued;
+    if (!q) return;
+    this.laserQueued = null;
+    this.board.laser(q.pts, this.laserDot, q.page);
+  }
+
+  /** Collects laser samples for this frame; a change of page / segment / hover sends what's queued. */
+  private queueLaser(page: string, p: LaserPt) {
+    const q = this.laserQueued;
+    const prev = q?.pts[q.pts.length - 1];
+    if (q && prev && (q.page !== page || prev.seg !== p.seg || !!prev.hover !== !!p.hover || !!prev.noTrail !== !!p.noTrail)) this.sendLaser();
+    if (this.laserQueued) this.laserQueued.pts.push(p);
+    else this.laserQueued = { page, pts: [p] };
+  }
+
+  // ---------- two-finger double tap = undo ----------
+  private tapDown(e: PointerEvent) {
+    const now = performance.now();
+    const pos = { x: e.clientX, y: e.clientY };
+    if (this.touches.size === 1) {
+      this.tap = { t0: now, n: 1, start: new Map([[e.pointerId, pos]]), view: { scale: this.scale, ox: this.ox, oy: this.oy, fit: this.fit } };
+    } else if (this.tap && this.touches.size === 2 && this.tap.n === 1 && now - this.tap.t0 <= TAP_LAND_MS) {
+      this.tap.n = 2;
+      this.tap.start.set(e.pointerId, pos);
+    } else this.dropTap();
+  }
+
+  private tapMove(e: PointerEvent) {
+    const t = this.tap;
+    if (!t) return;
+    const s = t.start.get(e.pointerId);
+    if (performance.now() - t.t0 > TAP_MS || (s && Math.hypot(e.clientX - s.x, e.clientY - s.y) > TAP_MOVE_PX)) return this.dropTap();
+    if (t.n === 2 && this.touches.size === 2) {
+      const [a, b] = [...t.start.values()], [c, d] = [...this.touches.values()];
+      const k = (Math.hypot(c.x - d.x, c.y - d.y) || 1) / (Math.hypot(a.x - b.x, a.y - b.y) || 1);
+      if (k < 0.85 || k > 1.15) this.dropTap();
     }
   }
+
+  /** Not a tap after all (a pinch, a pan, a third finger): send the view if the fingers moved it. */
+  private dropTap() {
+    const t = this.tap;
+    if (!t) return;
+    this.tap = null;
+    if (t.view.scale !== this.scale || t.view.ox !== this.ox || t.view.oy !== this.oy) this.queueViewSend();
+  }
+
+  private tapEnd(cancelled: boolean) {
+    const t = this.tap!;
+    const now = performance.now();
+    if (cancelled || t.n !== 2 || now - t.t0 > TAP_MS) return this.dropTap();
+    this.tap = null;
+    // Put back the view as it was before the tap (the pinch logic may have nudged it a little).
+    if (t.view.scale !== this.scale || t.view.ox !== this.ox || t.view.oy !== this.oy) {
+      this.scale = t.view.scale;
+      this.ox = t.view.ox;
+      this.oy = t.view.oy;
+      this.fit = t.view.fit;
+      this.viewChanged(false);
+    }
+    if (now - this.lastTwoTap <= DOUBLE_TAP_MS) {
+      this.lastTwoTap = 0;
+      if (this.canDraw()) {
+        this.board.undo();
+        this.showHint("↶ בוטל");
+      }
+    } else this.lastTwoTap = now;
+  }
+
+  private showHint(text: string) {
+    this.hint.textContent = text;
+    this.hint.hidden = false;
+    this.hint.classList.remove("show");
+    void this.hint.offsetWidth; // restart the animation
+    this.hint.classList.add("show");
+    clearTimeout(this.hintTimer);
+    this.hintTimer = window.setTimeout(() => { this.hint.hidden = true; }, 900);
+  }
 }
+
 
 /**
  * Allowed offset on one axis. A page smaller than the screen stays fully visible; a larger
