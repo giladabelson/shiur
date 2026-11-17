@@ -72,12 +72,17 @@ async function mouseDraw(page, pts) {
 }
 const strokes = (page) => page.evaluate(() => Object.values(window.__board.state.strokes).filter((s) => !s.del).length);
 const connected = (page) => page.evaluate(() => [...window.__room.peers.values()].filter((p) => p.link.state === "connected").length);
-/** How much of the current page is on screen, as a fraction of the screen's board area (0 = gone). */
+/** How much of the board's pages is on screen, as a fraction of the screen's board area (0 = gone). */
 const pageOnScreen = (page) => page.evaluate(() => {
-  const v = window.__view, p = window.__board.currentPage;
-  const x0 = Math.max(0, v.ox), y0 = Math.max(0, v.oy);
-  const x1 = Math.min(v.cssW, v.ox + p.w * v.scale), y1 = Math.min(v.cssH, v.oy + p.h * v.scale);
-  return Math.max(0, x1 - x0) * Math.max(0, y1 - y0) / (v.cssW * v.cssH);
+  const v = window.__view;
+  let sum = 0;
+  for (const p of window.__board.pages) {
+    const r = v.pageRect(p.id);
+    const x0 = Math.max(0, r.x), y0 = Math.max(0, r.y);
+    const x1 = Math.min(v.cssW, r.x + r.w), y1 = Math.min(v.cssH, r.y + r.h);
+    sum += Math.max(0, x1 - x0) * Math.max(0, y1 - y0);
+  }
+  return sum / (v.cssW * v.cssH);
 });
 
 try {
@@ -127,8 +132,8 @@ try {
   check("teacher: zoomed in, the wheel scrolls the page", yAfter < yBefore - 100, `${Math.round(yBefore)} -> ${Math.round(yAfter)}`);
   for (let i = 0; i < 80; i++) await T.mouse.wheel(0, 500);
   await sleep(100);
-  const edge = await T.evaluate(() => { const v = window.__view, p = window.__board.currentPage; return v.oy + p.h * v.scale - v.cssH; });
-  check("teacher: scrolling stops at the bottom of the page", edge >= -41 && edge <= 1, `bottom edge ${Math.round(edge)}px from screen bottom`);
+  const edge = await T.evaluate(() => { const v = window.__view, ps = window.__board.pages, r = v.pageRect(ps[ps.length - 1].id); return r.y + r.h - v.cssH; });
+  check("teacher: scrolling stops at the bottom of the last page", edge >= -41 && edge <= 1, `bottom edge ${Math.round(edge)}px from screen bottom`);
   await T.screenshot({ path: `${OUT}/01-teacher-scrolled-to-bottom.png` });
   await T.evaluate(() => window.__view.fitPage());
   // iPad: once the Pencil was used, a finger moves the page; a long fling can't push it away
@@ -149,8 +154,12 @@ try {
     const v = window.__view;
     // emulate: what the view does internally after a crazy offset
     v.ox = -99999; v.oy = 99999; v.zoomBy(1);
-    const p = window.__board.currentPage;
-    return v.ox >= -1 && v.oy + p.h * v.scale <= v.cssH + 1;
+    // the pages (stacked) are taller than the screen: the top of the first page can't move
+    // further down than the small margin, and the pages still cover the screen
+    const ps = window.__board.pages, first = v.pageRect(ps[0].id), last = v.pageRect(ps[ps.length - 1].id);
+    const inside = v.ox >= -1 && v.ox + first.w <= v.cssW + 1;
+    const tall = last.y + last.h - first.y > v.cssH;
+    return inside && (tall ? first.y <= 41 && last.y + last.h >= v.cssH - 41 : first.y >= -1 && last.y + last.h <= v.cssH + 1);
   }));
   await T.evaluate(() => window.__view.fitPage());
   await I.evaluate(() => window.__view.fitPage());
@@ -226,10 +235,11 @@ try {
     const id = window.__board.state.side?.asset;
     return !!id && !window.__board.haveAssets.has(id);
   }));
-  check("board is unchanged next to the side file", (await strokes(S)) === 3 && (await S.evaluate(() => window.__board.pages.length)) === 1);
+  // (2 pages: the written page and the blank page added after it)
+  check("board is unchanged next to the side file", (await strokes(S)) === 3 && (await S.evaluate(() => window.__board.pages.length)) === 2);
   check("student's board re-fits next to the side file (whole page visible)", await S.evaluate(() => {
-    const v = window.__view, p = window.__board.currentPage;
-    return v.ox >= 0 && v.oy >= 0 && v.ox + p.w * v.scale <= v.cssW + 1 && v.oy + p.h * v.scale <= v.cssH + 1;
+    const v = window.__view, r = v.pageRect();
+    return r.x >= 0 && r.y >= 0 && r.x + r.w <= v.cssW + 1 && r.y + r.h <= v.cssH + 1;
   }));
   // zoom and scroll inside the file
   const viewBefore = await S.evaluate(() => ({ s: window.__view.zoomPct, ox: window.__view.ox, oy: window.__view.oy }));

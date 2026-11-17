@@ -209,7 +209,14 @@ try {
   await dl.saveAs(`${OUT}/board.pdf`);
   const txt = fs.readFileSync(`${OUT}/board.pdf`, "latin1");
   const n = (txt.match(/\/Type\s*\/Page[^s]/g) || []).length;
-  check(`PDF export (${n} pages)`, txt.startsWith("%PDF") && n === (await T.evaluate(() => window.__board.pages.length)));
+  // every page except the blank page(s) waiting at the end of the board for more writing
+  const expected = await T.evaluate(() => {
+    const b = window.__board, ps = b.pages;
+    let k = ps.length;
+    while (k > 1 && !ps[k - 1].bg && !b.strokes(ps[k - 1].id).length) k--;
+    return k;
+  });
+  check(`PDF export (${n} pages)`, txt.startsWith("%PDF") && n === expected && expected < (await T.evaluate(() => window.__board.pages.length)), `expected ${expected}`);
   await T.screenshot({ path: `${OUT}/06-teacher.png` });
 } catch (e) {
   console.log("CRASH", e);
