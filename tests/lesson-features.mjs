@@ -141,6 +141,7 @@ try {
   check("teacher: scrolling stops at the bottom of the last page", edge >= -41 && edge <= 1, `bottom edge ${Math.round(edge)}px from screen bottom`);
   await T.screenshot({ path: `${OUT}/01-teacher-scrolled-to-bottom.png` });
   await T.evaluate(() => window.__view.fitPage());
+  await sleep(600); // the iPad follows the teacher's view (it doesn't while the Pencil is writing)
   // iPad: once the Pencil was used, a finger moves the page; a long fling can't push it away
   await pen(I, [[200, 200], [260, 230]]);
   await sleep(700);
@@ -241,11 +242,13 @@ try {
     return !!id && !window.__board.haveAssets.has(id);
   }));
   // (2 pages: the written page and the blank page added after it)
-  check("board is unchanged next to the side file", (await strokes(S)) === 3 && (await S.evaluate(() => window.__board.pages.length)) === 2);
-  check("student's board re-fits next to the side file (whole page visible)", await S.evaluate(() => {
-    const v = window.__view, r = v.pageRect();
-    return r.x >= 0 && r.y >= 0 && r.x + r.w <= v.cssW + 1 && r.y + r.h <= v.cssH + 1;
-  }));
+  check("board is unchanged next to the side file", (await strokes(S)) === 3 && (await S.evaluate(() => window.__board.pages.length)) === 2,
+    JSON.stringify(await S.evaluate(() => window.__board.pages.map((p) => [p.h, Object.values(window.__board.state.strokes).filter((s) => !s.del && s.page === p.id).length]))));
+  // A portrait page fits the width (scroll down for the rest); a landscape page fits whole.
+  check("student's board re-fits next to the side file (the whole width, from the top)", await S.evaluate(() => {
+    const v = window.__view, r = v.pageRect(), p = window.__board.currentPage;
+    return r.x >= 0 && r.y >= 0 && r.x + r.w <= v.cssW + 1 && (p.h > p.w || r.y + r.h <= v.cssH + 1);
+  }), JSON.stringify(await S.evaluate(() => ({ r: window.__view.pageRect(), w: window.__view.cssW, h: window.__view.cssH }))));
   // zoom and scroll inside the file
   const viewBefore = await S.evaluate(() => ({ s: window.__view.zoomPct, ox: window.__view.ox, oy: window.__view.oy }));
   await S.click('.sidefile button[aria-label="הגדל"]');
