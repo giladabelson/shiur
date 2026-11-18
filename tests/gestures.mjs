@@ -243,13 +243,20 @@ try {
   const after = await I.evaluate(() => { const l = window.__board.lasers.get(window.__board.me); return l && { n: l.trail.length, head: l.head }; });
   check("Pencil hover adds no trail, but shows the dot", !!after && after.n <= before && after.head.show && after.head.x > 0);
   check("the trail fades away after a couple of seconds", await until(() => S.evaluate((me) => !(window.__board.lasers.get(me)?.trail.length), me), 5000));
-  // a mouse hovering (student pointing) still draws a trail
+  // a mouse (student pointing): nothing while just moving, a trail while the left button is pressed
   {
     const sb = await box(S);
     await S.mouse.move(sb.x + 300, sb.y + 300);
     for (let i = 0; i < 12; i++) { await S.mouse.move(sb.x + 300 + i * 15, sb.y + 300 + i * 3); await sleep(20); }
-    const sl = await S.evaluate(() => { const l = window.__board.lasers.get(window.__board.me); return l && { n: l.trail.length, show: l.head.show, segs: new Set(l.trail.map((p) => p.seg)).size }; });
-    check("mouse hover: a trail (one piece) and the dot", !!sl && sl.n > 3 && sl.show && sl.segs === 1, JSON.stringify(sl));
+    const sMe = await S.evaluate(() => window.__board.me);
+    await sleep(300);
+    check("mouse moving without pressing: no pointer", await S.evaluate(() => !window.__board.lasers.has(window.__board.me)) && await T.evaluate((me) => !window.__board.lasers.has(me), sMe));
+    await S.mouse.down();
+    for (let i = 0; i < 12; i++) { await S.mouse.move(sb.x + 300 + i * 15, sb.y + 340 + i * 3); await sleep(20); }
+    const sl = await S.evaluate(() => { const l = window.__board.lasers.get(window.__board.me); return l && { n: l.trail.length, segs: new Set(l.trail.map((p) => p.seg)).size }; });
+    await S.mouse.up();
+    check("left button pressed: a trail (one piece)", !!sl && sl.n > 3 && sl.segs === 1, JSON.stringify(sl));
+    check("the teacher sees it", await until(() => T.evaluate((me) => window.__board.lasers.has(me), sMe), 3000));
   }
 
   // ---------------- two-finger tap = undo (iPad) ----------------

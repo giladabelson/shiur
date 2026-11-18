@@ -184,8 +184,13 @@ try {
   await S.mouse.move(sb.x + 405, sb.y + 303);
   await sleep(600);
   check("a bumped / resting mouse shows no pointer to the teacher", await T.evaluate(() => window.__board.lasers.size === 0));
-  await S.mouse.move(sb.x + 500, sb.y + 340, { steps: 8 }); // a deliberate movement
-  check("moving the mouse shows the pointer to the teacher", await until(() => T.evaluate(() => window.__board.lasers.size === 1), 3000));
+  await S.mouse.move(sb.x + 500, sb.y + 340, { steps: 8 }); // moving without pressing
+  await sleep(600);
+  check("moving the mouse without pressing shows no pointer", await T.evaluate(() => window.__board.lasers.size === 0));
+  await S.mouse.down();
+  await S.mouse.move(sb.x + 600, sb.y + 360, { steps: 8 }); // pressing the left button
+  check("pressing the left button shows the pointer to the teacher", await until(() => T.evaluate(() => window.__board.lasers.size === 1), 3000));
+  await S.mouse.up();
   await mouseDraw(S, [[300, 450], [500, 470], [650, 450]]);
   await sleep(600);
   check("pointer-only student leaves no ink", (await strokes(T)) === 1 && (await strokes(S)) === 1);

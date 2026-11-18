@@ -1351,11 +1351,12 @@ export class BoardView {
       this.hover = { x: e.clientX, y: e.clientY, on: true };
       this.topDirty = true;
     }
-    if (this.tool === "laser" && (e.buttons || e.pointerType === "pen" || e.pointerType === "mouse")) {
-      // The laser follows the mouse / Pencil hover even without pressing, but only once the user
-      // actually moves it (a resting or slightly bumped mouse shows nothing).
+    if (this.tool === "laser" && (e.buttons || e.pointerType === "pen")) {
+      // A mouse points only while its left button is pressed (moving it around shows nothing).
+      // A hovering Pencil shows the dot, once it really moves.
+      if (e.pointerType === "mouse" && !(e.buttons & 1)) return;
       if (e.buttons || this.laserMoved(e.clientX, e.clientY)) {
-        // Pressed: a trail. A hovering mouse: a trail and the dot. A hovering Pencil: only the dot.
+        // Pressed: a trail. A hovering Pencil: only the dot.
         const hover = !e.buttons;
         const noTrail = hover && e.pointerType === "pen";
         const evs = !hover ? (e.getCoalescedEvents?.() ?? [e]) : [e];
@@ -1429,7 +1430,7 @@ export class BoardView {
   }
 
   /**
-   * Hover laser: true once the mouse makes a deliberate movement (LASER_START_PX within
+   * Hover laser (Pencil): true once it makes a deliberate movement (LASER_START_PX within
    * LASER_WINDOW_MS). A resting, bumped or slowly drifting mouse shows nothing.
    */
   private laserMoved(cx: number, cy: number): boolean {
