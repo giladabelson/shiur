@@ -41,6 +41,8 @@ export interface Page {
   /** paper template and its version */
   tpl?: Template;
   tv?: number;
+  /** version of the page size (portrait / landscape); higher wins */
+  hv?: number;
   /** teacher-only page: never sent to students */
   priv?: boolean;
   del: boolean;
@@ -76,12 +78,21 @@ export interface BoardState {
 }
 
 export const PAGE_W = 1000;
+/** A landscape blank page. */
 export const BLANK_H = 625;
+/** A portrait blank page (A4). New boards start with portrait pages. */
+export const PORTRAIT_H = 1414;
+
+/** Height of a new blank page: like the last blank page on the board (portrait if there's none). */
+export function newBlankH(pages: Page[]): number {
+  for (let i = pages.length - 1; i >= 0; i--) if (!pages[i].bg && !pages[i].del) return pages[i].h;
+  return PORTRAIT_H;
+}
 
 export const uid = () => crypto.randomUUID().replace(/-/g, "").slice(0, 16);
 
 export function emptyState(lesson?: LessonInfo): BoardState {
-  const first: Page = { id: "p-first", order: 0, w: PAGE_W, h: BLANK_H, del: false, dv: 0 };
+  const first: Page = { id: "p-first", order: 0, w: PAGE_W, h: PORTRAIT_H, del: false, dv: 0 };
   return {
     pages: { [first.id]: first }, strokes: {}, current: { page: first.id, ts: 0 },
     lock: { on: true, ts: 0 }, side: null, ...(lesson ? { lesson } : {}),
@@ -202,6 +213,11 @@ function mergePage(st: BoardState, p: Page): boolean {
   if ((p.tv ?? 0) > (cur.tv ?? 0)) {
     cur.tpl = p.tpl;
     cur.tv = p.tv;
+    changed = true;
+  }
+  if ((p.hv ?? 0) > (cur.hv ?? 0)) {
+    cur.h = p.h;
+    cur.hv = p.hv;
     changed = true;
   }
   return changed;

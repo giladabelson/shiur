@@ -297,6 +297,10 @@ export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
     opts.isStaff ? choice("דף פרטי חדש (רק אתה רואה)", false, () => { closePop(); board.addPage(true); toast("דף פרטי: התלמיד לא רואה אותו"); }, "lock") : null,
     choice("שכפל עמוד", false, () => { closePop(); board.duplicatePage(); }, "copy"),
     board.canPaste ? choice("הדבק כאן", false, () => { closePop(); view.pasteHere(); }, "paste") : null,
+    label("כיוון הדף"),
+    h("div", { class: "pop-grid tpl" },
+      choice("לאורך", board.currentPage.h > board.currentPage.w, () => { closePop(); if (board.currentPage.bg) toast("לעמוד עם PDF או תמונה יש גודל משלו"); else { board.setOrientation(true); view.fitPage(); } }),
+      choice("לרוחב", board.currentPage.h <= board.currentPage.w, () => { closePop(); if (board.currentPage.bg) toast("לעמוד עם PDF או תמונה יש גודל משלו"); else { board.setOrientation(false); view.fitPage(); } })),
     label("רקע לעמוד"),
     h("div", { class: "pop-grid tpl" }, ...TEMPLATES.map((t) =>
       choice(t.label, (board.currentPage.tpl ?? "grid") === t.id, () => { closePop(); if (board.currentPage.bg) toast("לעמוד עם PDF או תמונה אין רקע"); else board.setTemplate(t.id); }))),
@@ -363,10 +367,21 @@ export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
       const s = board.state.strokes[view.selection[0]];
       view.restyleSelection({ dash: !s?.dash });
     }),
-    iconBtn("copy", "העתק (אפשר להדביק גם בעמוד אחר)", () => { view.copySelection(); toast("הועתק. להדבקה: תפריט העמודים ← הדבק כאן"); }),
+    iconBtn("copy", "העתק (להדבקה: טאפ עם האצבע במקום הרצוי)", () => { view.copySelection(); view.clearSelection(); }),
     iconBtn("plus", "שכפל", () => view.duplicateSelection()),
     iconBtn("trash", "מחק", () => view.deleteSelection()),
   ));
+
+  // one-finger tap on an empty spot: paste right there / select everything on the page
+  view.buildTapMenu = (page) => {
+    const items = [
+      board.canPaste ? h("button", { class: "tapbtn", type: "button", onclick: () => view.pasteAtTap() }, icon("paste", 18), "הדבק") : null,
+      board.strokes(page).length
+        ? h("button", { class: "tapbtn", type: "button", onclick: () => view.selectAllAtTap() }, icon("lasso", 18), "בחר הכל")
+        : null,
+    ].filter((x): x is HTMLButtonElement => !!x);
+    return items.length ? h("div", { class: "selbar" }, ...items) : null;
+  };
 
   const row1 = h("div", { class: "tb-row" },
     h("div", { class: "tgroup tools" },
