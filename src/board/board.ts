@@ -1,7 +1,7 @@
 // Board controller: owns the state, applies local actions, syncs with peers, persists to IndexedDB.
 
 import {
-  applyOp, emptyState, livePages, pageStrokes, uid, compactPts, opPage, isPrivate, newerLesson, hasContent, nextPageId, PAGE_W, BLANK_H,
+  applyOp, emptyState, livePages, pageStrokes, uid, compactPts, opPage, isPrivate, newerLesson, hasContent, nextPageId, PAGE_W, BLANK_H, PORTRAIT_H, newBlankH,
   type BoardOp, type BoardState, type LessonInfo, type Page, type Pt, type Stroke, type Tool, type Template,
 } from "./model";
 import { loadBoard, saveBoard, loadAsset, saveAsset, hashBytes, toB64, fromB64 } from "./store";
@@ -305,14 +305,14 @@ export class Board {
     if (old && strokePage === undefined) return;
     const tpl = last.bg ? undefined : last.tpl;
     const page: Page = {
-      id, order: last.order + 1, w: PAGE_W, h: BLANK_H, tpl, tv: tpl ? 1 : undefined, priv: last.priv || undefined,
+      id, order: last.order + 1, w: PAGE_W, h: newBlankH(ps), tpl, tv: tpl ? 1 : undefined, priv: last.priv || undefined,
       del: false, dv: old ? old.dv + 1 : 0,
     };
     this.local({ t: "b.page", page });
   }
 
   private ensureAPage(): Page {
-    const p: Page = { id: uid(), order: 0, w: PAGE_W, h: BLANK_H, del: false, dv: 0 };
+    const p: Page = { id: uid(), order: 0, w: PAGE_W, h: PORTRAIT_H, del: false, dv: 0 };
     this.local({ t: "b.page", page: p });
     return p;
   }
@@ -347,7 +347,7 @@ export class Board {
 
   addPage(priv = false) {
     const tpl = this.currentPage.bg ? undefined : this.currentPage.tpl;
-    const [p] = this.insertPages([{ w: PAGE_W, h: BLANK_H, tpl, tv: tpl ? 1 : undefined, priv: priv || undefined }]);
+    const [p] = this.insertPages([{ w: PAGE_W, h: newBlankH(this.pages), tpl, tv: tpl ? 1 : undefined, priv: priv || undefined }]);
     this.go(p.id);
   }
 
@@ -371,6 +371,20 @@ export class Board {
     const next = ps[i + 1] ?? ps[i - 1];
     this.local({ t: "b.page", page: { ...cur, del: true, dv: cur.dv + 1 } });
     this.go(next.id);
+  }
+
+  /**
+   * Portrait / landscape for the current page and the empty blank pages after it (so new pages
+   * follow too). Pages with a PDF or an image keep their own size.
+   */
+  setOrientation(portrait: boolean) {
+    const h = portrait ? PORTRAIT_H : BLANK_H;
+    const cur = this.currentPage;
+    for (const p of this.pages) {
+      if (p.bg || p.h === h) continue;
+      if (p.id !== cur.id && !(p.order > cur.order && !this.strokes(p.id).length)) continue;
+      this.local({ t: "b.page", page: { ...p, h, hv: (p.hv ?? 0) + 1 } });
+    }
   }
 
   setTemplate(tpl: Template) {
@@ -601,6 +615,19 @@ export class Board {
     const page = this.currentPage.id;
     const off = this.clip[0].page === page ? 24 : 0;
     const copies = this.clip.map((s) => this.cloneStroke(s, page, off, off));
+    for (const s of copies) this.local({ t: "b.stroke", s });
+    this.pushUndo({ kind: "add", ids: copies.map((s) => s.id) });
+    this.ensureTrailingPage(page);
+    return copies.map((s) => s.id);
+  }
+
+  /** Pastes the clipboard on a page, centered at x, y (page units). Returns the new ids. */
+  pasteAt(page: string, x: number, y: number): string[] {
+    if (!this.clip.length || !this.state.pages[page]) return [];
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const s of this.clip) for (const [px, py] of s.pts) { x0 = Math.min(x0, px); y0 = Math.min(y0, py); x1 = Math.max(x1, px); y1 = Math.max(y1, py); }
+    const dx = x - (x0 + x1) / 2, dy = y - (y0 + y1) / 2;
+    const copies = this.clip.map((s) => this.cloneStroke(s, page, dx, dy));
     for (const s of copies) this.local({ t: "b.stroke", s });
     this.pushUndo({ kind: "add", ids: copies.map((s) => s.id) });
     this.ensureTrailingPage(page);

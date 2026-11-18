@@ -153,6 +153,8 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
     const view = new BoardView(board);
     (window as any).__view = view;
     view.canDraw = () => board.canDraw(role);
+    // Teacher / iPad: fingers only scroll and zoom, the pen writes. A student without a pen may write with a finger.
+    view.fingersDraw = role === "student";
 
     // split view: a file pinned next to the board (never on the iPad)
     const sideInput = h("input", { type: "file", accept: "application/pdf,image/*", hidden: true }) as HTMLInputElement;

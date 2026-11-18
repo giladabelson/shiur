@@ -23,10 +23,14 @@ const SEL_COLOR = "#2563eb";
 /** Two-finger tap: both fingers down and up within this time, each moving less than TAP_MOVE_PX. */
 const TAP_MS = 300;
 const TAP_MOVE_PX = 15;
-/** A second two-finger tap within this time of the first one undoes. */
-const DOUBLE_TAP_MS = 450;
 /** The second finger must land this soon after the first one for a two-finger tap. */
 const TAP_LAND_MS = 150;
+/** After writing / touching here, another device's view doesn't move this one for this long. */
+const LOCAL_HOLD_MS = 4000;
+/** Fingers must move this much (screen px) before the page pans: a resting hand doesn't move it. */
+const PAN_START_PX = 10;
+/** A pinch must change the finger distance by this much (or move PAN_START_PX) before it zooms. */
+const PINCH_START = 0.06;
 
 interface Drawable {
   tool: Tool;
@@ -291,6 +295,9 @@ export class BoardView {
   private bctx: CanvasRenderingContext2D;
   private tctx: CanvasRenderingContext2D;
   private selMenu: HTMLDivElement;
+  private tapMenu: HTMLDivElement;
+  /** Where the last one-finger tap was (for "paste here" / "select all" in the tap menu). */
+  private tapAt: { page: string; x: number; y: number } | null = null;
   private privBadge: HTMLDivElement;
   private dpr = 1;
   private cssW = 0;
@@ -344,6 +351,12 @@ export class BoardView {
   private penActive = false;
   private penSeenAt = 0;
   private penMode = false;
+  /** Fingers draw (only before a Pencil is seen). Off: fingers only scroll and zoom, the pen writes. */
+  fingersDraw = false;
+  /** The view when the first finger of the current touch landed: a pen landing after a palm puts it back. */
+  private touchView: { scale: number; ox: number; oy: number; fit: boolean } | null = null;
+  /** Last time the pen / mouse / a finger was used on this device. */
+  private localAt = -Infinity;
   private drawing: (Drawable & {
     id: string; page: string; kind: ViewTool; pointerId: number; sentUpTo: number; snapped: boolean; origin: [number, number];
     /** Touch strokes are streamed only after a moment (a two-finger tap / pinch cancels them first). */
@@ -361,8 +374,9 @@ export class BoardView {
   private sel: { ids: string[]; page: string; box: { x0: number; y0: number; x1: number; y1: number } } | null = null;
   private selDrag: { pointerId: number; mode: "move" | "scale"; start: [number, number]; anchor: [number, number]; m: Mat; lastSent: number; drag: { g: string; v: number } } | null = null;
   private touches = new Map<number, { x: number; y: number }>();
-  private gesture: { startDist: number; startScale: number; cx: number; cy: number; ox: number; oy: number; px: number; py: number } | null = null;
-  private panning: { pointerId: number; x: number; y: number; ox: number; oy: number } | null = null;
+  private gesture: { startDist: number; startScale: number; cx: number; cy: number; ox: number; oy: number; px: number; py: number; live: boolean } | null = null;
+  /** live: false until the finger moved enough (a hand resting on the screen doesn't move the page). */
+  private panning: { pointerId: number; x: number; y: number; ox: number; oy: number; live: boolean } | null = null;
   private hover: { x: number; y: number; on: boolean } = { x: 0, y: 0, on: false };
   private spaceDown = false;
   /** Laser samples since the last frame (all on one page, one segment, one hover state). */
@@ -371,9 +385,6 @@ export class BoardView {
   private laserSeg = 0;
   /** Two-finger tap in progress (cleared as soon as it turns into a pinch / pan or a third finger). */
   private tap: { t0: number; n: number; start: Map<number, { x: number; y: number }>; view: { scale: number; ox: number; oy: number; fit: boolean } } | null = null;
-  private lastTwoTap = 0;
-  private hint: HTMLDivElement;
-  private hintTimer: number | undefined;
   /** Where a hovering mouse last came to rest; the pointer only shows once it really moves. */
   private laserRest: { x: number; y: number; at: number } | null = null;
   private laserDown: number | null = null;
@@ -392,10 +403,10 @@ export class BoardView {
     this.privBadge.className = "priv-badge";
     this.privBadge.textContent = "🔒 דף פרטי: התלמיד לא רואה אותו";
     this.privBadge.hidden = true;
-    this.hint = document.createElement("div");
-    this.hint.className = "board-hint";
-    this.hint.hidden = true;
-    this.el.append(this.base, this.top, this.selMenu, this.privBadge, this.hint);
+    this.tapMenu = document.createElement("div");
+    this.tapMenu.className = "sel-menu tap-menu";
+    this.tapMenu.hidden = true;
+    this.el.append(this.base, this.top, this.selMenu, this.tapMenu, this.privBadge);
     this.bctx = this.base.getContext("2d")!;
     this.tctx = this.top.getContext("2d", { desynchronized: true } as CanvasRenderingContext2DSettings)!;
     new ResizeObserver(() => this.resize()).observe(this.el);
@@ -520,11 +531,15 @@ export class BoardView {
     if (this.cssW > 1) this.queueViewSend();
   }
 
-  /** Fit the page on screen (as wide as possible while the whole page fits), its top at the top. */
+  /**
+   * Fit the page on screen, its top at the top: a landscape page as wide as possible while the
+   * whole page fits; a portrait page as wide as the screen (scroll down to write further, like a notebook).
+   */
   private fitTo(p: Page) {
     this.ensureLayout();
     const top = this.layout.get(p.id) ?? 0;
-    this.scale = Math.max(0.05, Math.min((this.cssW - FIT_PAD * 2) / p.w, (this.cssH - FIT_PAD * 2) / p.h));
+    const byW = (this.cssW - FIT_PAD * 2) / p.w, byH = (this.cssH - FIT_PAD * 2) / p.h;
+    this.scale = Math.max(0.05, p.h > p.w ? byW : Math.min(byW, byH));
     this.ox = (this.cssW - p.w * this.scale) / 2;
     this.oy = this.docH * this.scale <= this.cssH ? (this.cssH - this.docH * this.scale) / 2 : FIT_PAD - top * this.scale;
     this.fit = true;
@@ -559,6 +574,7 @@ export class BoardView {
     this.clampView();
     this.baseDirty = this.topDirty = true;
     if (user) {
+      this.hideTapMenu();
       this.pendingView = null;
       this.followed = null;
       this.updateCurrentFromCenter();
@@ -649,7 +665,8 @@ export class BoardView {
 
   /** Show the same part of the board as the teacher (never sent on: no loops). */
   applyRemoteView(v: ViewMsg) {
-    if (this.busy) return;
+    // While writing here (e.g. on the iPad between strokes), the other device's view never moves the page.
+    if (this.busy || (this.board.isStaff && performance.now() - this.localAt < LOCAL_HOLD_MS)) return;
     const top = this.board.state === this.stateRef ? this.topOf(v.page) : undefined;
     if (top === undefined || this.cssW <= 1 || this.cssH <= 1) {
       // The page hasn't arrived yet (or the board is hidden): apply it when it can be.
@@ -1165,14 +1182,18 @@ export class BoardView {
   }
 
   private down(e: PointerEvent) {
+    this.hideTapMenu();
+    this.localAt = performance.now();
     if (e.pointerType === "pen") {
       this.penActive = true;
       this.penSeenAt = performance.now();
       this.penMode = true;
+      if (this.touches.size) this.dropPalm();
     }
     if (e.pointerType === "touch") {
       // Palm rejection: ignore touches while / right after the Pencil is used.
       if (this.penActive || performance.now() - this.penSeenAt < PEN_GRACE_MS) return;
+      if (!this.touches.size) this.touchView = { scale: this.scale, ox: this.ox, oy: this.oy, fit: this.fit };
       this.touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
       this.tapDown(e);
       if (this.touches.size >= 2) {
@@ -1181,7 +1202,8 @@ export class BoardView {
         this.startGesture();
         return;
       }
-      if (this.penMode || this.tool === "pan" || !this.canDraw()) {
+      // Fingers scroll and zoom; only the pen writes (unless this device draws with fingers).
+      if (!this.fingersDraw || this.penMode || this.tool === "pan" || !this.canDraw()) {
         this.startPan(e);
         return;
       }
@@ -1209,9 +1231,10 @@ export class BoardView {
       this.queueLaser(pg.id, { x, y, seg: this.laserSeg });
       return;
     }
-    if (this.tool === "lasso" && !penEraser) {
-      const sp = this.sel?.page;
-      const [sx, sy] = sp ? this.toLocal(e.clientX, e.clientY, sp) : [x, y];
+    if (this.sel && !penEraser) {
+      // Grabbing the selection (with any tool: a finger tap may have selected it) moves / resizes it.
+      const sp = this.sel.page;
+      const [sx, sy] = this.toLocal(e.clientX, e.clientY, sp);
       const hit = this.selHit(sx, sy);
       if (hit) {
         const anchor: [number, number] = hit === "move" ? [sx, sy] : hit;
@@ -1221,6 +1244,8 @@ export class BoardView {
         this.baseDirty = this.topDirty = true;
         return;
       }
+    }
+    if (this.tool === "lasso" && !penEraser) {
       this.clearSelection();
       this.lasso = { pointerId: e.pointerId, page: pg.id, pts: [[x, y]], rect: this.lassoMode === "rect" };
       return;
@@ -1292,7 +1317,11 @@ export class BoardView {
   }
 
   private move(e: PointerEvent) {
-    if (e.pointerType === "touch" && this.touches.has(e.pointerId)) {
+    // A hovering Pencil (iPad Pro) is about to write: keep ignoring the hand.
+    if (e.pointerType === "pen") this.penSeenAt = performance.now();
+    // Touches that aren't tracked are a resting hand (ignored by palm rejection).
+    if (e.pointerType === "touch" && !this.touches.has(e.pointerId)) return;
+    if (e.pointerType === "touch") {
       this.touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
       this.tapMove(e);
       if (this.gesture) {
@@ -1301,8 +1330,19 @@ export class BoardView {
       }
     }
     if (this.panning && this.panning.pointerId === e.pointerId) {
-      this.ox = this.panning.ox + (e.clientX - this.panning.x);
-      this.oy = this.panning.oy + (e.clientY - this.panning.y);
+      const pn = this.panning;
+      if (!pn.live) {
+        // A finger (or a resting hand) that barely moves doesn't move the page.
+        if (e.pointerType === "touch" && Math.hypot(e.clientX - pn.x, e.clientY - pn.y) < PAN_START_PX) return;
+        pn.live = true;
+        pn.x = e.clientX;
+        pn.y = e.clientY;
+        pn.ox = this.ox;
+        pn.oy = this.oy;
+        return;
+      }
+      this.ox = pn.ox + (e.clientX - pn.x);
+      this.oy = pn.oy + (e.clientY - pn.y);
       this.fit = false;
       this.viewChanged(true);
       return;
@@ -1311,11 +1351,12 @@ export class BoardView {
       this.hover = { x: e.clientX, y: e.clientY, on: true };
       this.topDirty = true;
     }
-    if (this.tool === "laser" && (e.buttons || e.pointerType === "pen" || e.pointerType === "mouse")) {
-      // The laser follows the mouse / Pencil hover even without pressing, but only once the user
-      // actually moves it (a resting or slightly bumped mouse shows nothing).
+    if (this.tool === "laser" && (e.buttons || e.pointerType === "pen")) {
+      // A mouse points only while its left button is pressed (moving it around shows nothing).
+      // A hovering Pencil shows the dot, once it really moves.
+      if (e.pointerType === "mouse" && !(e.buttons & 1)) return;
       if (e.buttons || this.laserMoved(e.clientX, e.clientY)) {
-        // Pressed: a trail. A hovering mouse: a trail and the dot. A hovering Pencil: only the dot.
+        // Pressed: a trail. A hovering Pencil: only the dot.
         const hover = !e.buttons;
         const noTrail = hover && e.pointerType === "pen";
         const evs = !hover ? (e.getCoalescedEvents?.() ?? [e]) : [e];
@@ -1389,7 +1430,7 @@ export class BoardView {
   }
 
   /**
-   * Hover laser: true once the mouse makes a deliberate movement (LASER_START_PX within
+   * Hover laser (Pencil): true once it makes a deliberate movement (LASER_START_PX within
    * LASER_WINDOW_MS). A resting, bumped or slowly drifting mouse shows nothing.
    */
   private laserMoved(cx: number, cy: number): boolean {
@@ -1421,6 +1462,7 @@ export class BoardView {
   }
 
   private up(e: PointerEvent, cancelled = false) {
+    this.localAt = performance.now();
     if (e.pointerType === "pen") {
       this.penActive = false;
       this.penSeenAt = performance.now();
@@ -1432,11 +1474,12 @@ export class BoardView {
     }
     if (e.pointerType === "touch") {
       const had = this.touches.delete(e.pointerId);
+      if (!this.touches.size) this.touchView = null;
       if (had && !this.touches.size && this.tap) this.tapEnd(cancelled);
       if (this.gesture && this.touches.size < 2) {
         this.gesture = null;
         const rest = [...this.touches.entries()][0];
-        if (rest) this.panning = { pointerId: rest[0], x: rest[1].x, y: rest[1].y, ox: this.ox, oy: this.oy };
+        if (rest) this.panning = { pointerId: rest[0], x: rest[1].x, y: rest[1].y, ox: this.ox, oy: this.oy, live: false };
         return;
       }
     }
@@ -1507,7 +1550,27 @@ export class BoardView {
 
   private startPan(e: PointerEvent) {
     try { this.top.setPointerCapture(e.pointerId); } catch { /* ignore */ }
-    this.panning = { pointerId: e.pointerId, x: e.clientX, y: e.clientY, ox: this.ox, oy: this.oy };
+    this.panning = { pointerId: e.pointerId, x: e.clientX, y: e.clientY, ox: this.ox, oy: this.oy, live: false };
+  }
+
+  /**
+   * The pen came down while fingers were on the screen: those were the hand resting on it.
+   * Forget them (until they lift) and put the page back where it was before they landed.
+   */
+  private dropPalm() {
+    const v = this.touchView;
+    this.touches.clear();
+    this.tap = null;
+    this.gesture = null;
+    this.panning = null;
+    this.touchView = null;
+    if (v && (v.scale !== this.scale || v.ox !== this.ox || v.oy !== this.oy)) {
+      this.scale = v.scale;
+      this.ox = v.ox;
+      this.oy = v.oy;
+      this.fit = v.fit;
+      this.viewChanged(true);
+    }
   }
 
   private startGesture() {
@@ -1522,6 +1585,7 @@ export class BoardView {
       oy: this.oy,
       px: (a.x + b.x) / 2,
       py: (a.y + b.y) / 2,
+      live: false,
     };
   }
 
@@ -1530,6 +1594,14 @@ export class BoardView {
     const [a, b] = [...this.touches.values()];
     if (!a || !b) return;
     const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+    if (!g.live) {
+      // Two fingers (or a hand) resting on the screen don't zoom or move the page until they really move.
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      if (Math.abs(dist / g.startDist - 1) < PINCH_START && Math.hypot(mx - g.px, my - g.py) < PAN_START_PX) return;
+      const r = this.el.getBoundingClientRect();
+      Object.assign(g, { live: true, startDist: dist, startScale: this.scale, cx: mx - r.left, cy: my - r.top, ox: this.ox, oy: this.oy, px: mx, py: my });
+      return;
+    }
     const ns = Math.max(0.1, Math.min(12, (g.startScale * dist) / g.startDist));
     const k = ns / g.startScale;
     const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
@@ -1636,7 +1708,63 @@ export class BoardView {
     else this.laserQueued = { page, pts: [p] };
   }
 
-  // ---------- two-finger double tap = undo ----------
+  // ---------- one-finger tap = select / copy-paste menu ----------
+  /** Builds the content of the menu a one-finger tap on an empty spot opens (set by the toolbar). */
+  buildTapMenu: (page: string) => HTMLElement | null = () => null;
+
+  private fingerTap(cx: number, cy: number) {
+    const r = this.el.getBoundingClientRect();
+    const [dx, dy] = this.toDoc(cx, cy);
+    const pg = this.pageAtY(dy);
+    const x = dx, y = dy - (this.layout.get(pg.id) ?? 0);
+    if (this.sel) {
+      const [sx, sy] = this.toLocal(cx, cy, this.sel.page);
+      if (this.selHit(sx, sy)) return;
+    }
+    const near = 14 / this.scale;
+    const strokes = this.board.strokes(pg.id);
+    for (let i = strokes.length - 1; i >= 0; i--) {
+      if (hitStroke(strokes[i], x, y, near)) {
+        this.select([strokes[i].id]);
+        return;
+      }
+    }
+    if (this.sel) {
+      this.clearSelection();
+      return;
+    }
+    if (x < 0 || x > pg.w || y < 0 || y > pg.h) return;
+    const menu = this.buildTapMenu(pg.id);
+    if (!menu) return;
+    this.tapAt = { page: pg.id, x, y };
+    this.tapMenu.replaceChildren(menu);
+    const left = cx - r.left, top = cy - r.top;
+    this.tapMenu.style.left = `${Math.max(8, Math.min(this.cssW - 8, left))}px`;
+    this.tapMenu.style.top = `${Math.max(4, Math.min(this.cssH - 50, top > 70 ? top - 60 : top + 20))}px`;
+    this.tapMenu.hidden = false;
+  }
+
+  hideTapMenu() {
+    if (!this.tapMenu.hidden) this.tapMenu.hidden = true;
+  }
+
+  /** Pastes what was copied centered where the finger tapped, and selects it. */
+  pasteAtTap() {
+    const t = this.tapAt;
+    this.hideTapMenu();
+    if (!t || !this.board.state.pages[t.page]) return;
+    const ids = this.board.pasteAt(t.page, t.x, t.y);
+    if (ids.length) this.select(ids);
+  }
+
+  /** Selects all the ink on the page where the finger tapped. */
+  selectAllAtTap() {
+    const t = this.tapAt;
+    this.hideTapMenu();
+    if (t) this.select(this.board.strokes(t.page).map((s) => s.id));
+  }
+
+  // ---------- two-finger tap = undo ----------
   private tapDown(e: PointerEvent) {
     const now = performance.now();
     const pos = { x: e.clientX, y: e.clientY };
@@ -1671,6 +1799,13 @@ export class BoardView {
   private tapEnd(cancelled: boolean) {
     const t = this.tap!;
     const now = performance.now();
+    if (!cancelled && t.n === 1 && now - t.t0 <= TAP_MS && this.panning && !this.panning.live) {
+      // One finger, tapped (not drawing): select the ink under it, or open the copy / paste menu.
+      this.tap = null;
+      const p = [...t.start.values()][0];
+      if (this.canDraw()) this.fingerTap(p.x, p.y);
+      return;
+    }
     if (cancelled || t.n !== 2 || now - t.t0 > TAP_MS) return this.dropTap();
     this.tap = null;
     // Put back the view as it was before the tap (the pinch logic may have nudged it a little).
@@ -1681,26 +1816,9 @@ export class BoardView {
       this.fit = t.view.fit;
       this.viewChanged(false);
     }
-    if (now - this.lastTwoTap <= DOUBLE_TAP_MS) {
-      this.lastTwoTap = 0;
-      if (this.canDraw()) {
-        this.board.undo();
-        this.showHint("↶ בוטל");
-      }
-    } else this.lastTwoTap = now;
-  }
-
-  private showHint(text: string) {
-    this.hint.textContent = text;
-    this.hint.hidden = false;
-    this.hint.classList.remove("show");
-    void this.hint.offsetWidth; // restart the animation
-    this.hint.classList.add("show");
-    clearTimeout(this.hintTimer);
-    this.hintTimer = window.setTimeout(() => { this.hint.hidden = true; }, 900);
+    if (this.canDraw()) this.board.undo();
   }
 }
-
 
 /**
  * Allowed offset on one axis. A page smaller than the screen stays fully visible; a larger

@@ -1,6 +1,7 @@
 // Gesture / tool tests: lasso move really moves the ink on screen (teacher and student) and can
 // be moved again, rectangle selection, laser trail pieces that are never joined across presses,
-// two-finger double tap = undo on the iPad, and draw-and-hold circle that then grows with the pen.
+// two-finger tap = undo on the iPad, draw-and-hold circle that then grows with the pen, fingers only
+// scroll (palm rejection), one-finger tap menu (paste where tapped), portrait / landscape pages.
 // Usage: node tests/gestures.mjs [baseUrl] [outDir]
 import { chromium } from "playwright";
 import { admitInto } from "./lib/admit.mjs";
@@ -242,30 +243,32 @@ try {
   const after = await I.evaluate(() => { const l = window.__board.lasers.get(window.__board.me); return l && { n: l.trail.length, head: l.head }; });
   check("Pencil hover adds no trail, but shows the dot", !!after && after.n <= before && after.head.show && after.head.x > 0);
   check("the trail fades away after a couple of seconds", await until(() => S.evaluate((me) => !(window.__board.lasers.get(me)?.trail.length), me), 5000));
-  // a mouse hovering (student pointing) still draws a trail
+  // a mouse (student pointing): nothing while just moving, a trail while the left button is pressed
   {
     const sb = await box(S);
     await S.mouse.move(sb.x + 300, sb.y + 300);
     for (let i = 0; i < 12; i++) { await S.mouse.move(sb.x + 300 + i * 15, sb.y + 300 + i * 3); await sleep(20); }
-    const sl = await S.evaluate(() => { const l = window.__board.lasers.get(window.__board.me); return l && { n: l.trail.length, show: l.head.show, segs: new Set(l.trail.map((p) => p.seg)).size }; });
-    check("mouse hover: a trail (one piece) and the dot", !!sl && sl.n > 3 && sl.show && sl.segs === 1, JSON.stringify(sl));
+    const sMe = await S.evaluate(() => window.__board.me);
+    await sleep(300);
+    check("mouse moving without pressing: no pointer", await S.evaluate(() => !window.__board.lasers.has(window.__board.me)) && await T.evaluate((me) => !window.__board.lasers.has(me), sMe));
+    await S.mouse.down();
+    for (let i = 0; i < 12; i++) { await S.mouse.move(sb.x + 300 + i * 15, sb.y + 340 + i * 3); await sleep(20); }
+    const sl = await S.evaluate(() => { const l = window.__board.lasers.get(window.__board.me); return l && { n: l.trail.length, segs: new Set(l.trail.map((p) => p.seg)).size }; });
+    await S.mouse.up();
+    check("left button pressed: a trail (one piece)", !!sl && sl.n > 3 && sl.segs === 1, JSON.stringify(sl));
+    check("the teacher sees it", await until(() => T.evaluate((me) => window.__board.lasers.has(me), sMe), 3000));
   }
 
-  // ---------------- two-finger double tap = undo (iPad) ----------------
+  // ---------------- two-finger tap = undo (iPad) ----------------
   await I.click('.toolbar .tb-row button[aria-label^="עט (P)"]');
   await pen(I, line(150, 600, 400, 620, 12));
   check("iPad stroke synced", await until(async () => (await visible(S)).length === 3));
   await sleep(800); // past the palm-rejection time after the Pencil
   const viewBefore = await I.evaluate(() => JSON.stringify(window.__view.viewMessage()));
   await twoFingerTap(I);
-  await sleep(500);
-  check("one two-finger tap does nothing", (await visible(I)).length === 3);
-  await sleep(300);
-  await twoFingerTap(I);
-  await sleep(120);
-  await twoFingerTap(I);
-  check("two-finger double tap undoes the last stroke", await until(async () => (await visible(I)).length === 2 && (await visible(S)).length === 2, 4000));
-  check("the view is unchanged by the taps", (await I.evaluate(() => JSON.stringify(window.__view.viewMessage()))) === viewBefore);
+  check("one two-finger tap undoes the last stroke", await until(async () => (await visible(I)).length === 2 && (await visible(S)).length === 2, 4000));
+  check("no popup message after the undo", await I.evaluate(() => !document.querySelector(".board-hint")));
+  check("the view is unchanged by the tap", (await I.evaluate(() => JSON.stringify(window.__view.viewMessage()))) === viewBefore);
   await I.screenshot({ path: `${OUT}/03-ipad-after-undo.png` });
   // a pinch (fingers move apart) is a zoom, never an undo
   await sleep(600);
@@ -282,11 +285,9 @@ try {
   // palm rejection: taps right after the Pencil are ignored
   await pen(I, line(150, 520, 400, 530, 10));
   await twoFingerTap(I);
-  await sleep(100);
-  await twoFingerTap(I);
   await sleep(500);
-  check("taps right after the Pencil are ignored (palm)", (await visible(I)).length === 3, `${(await visible(I)).length} strokes; board ${JSON.stringify(await box(I))}`);
-  // the student (pointer only) can't undo with a double tap — no touch there; the rule is canDraw
+  check("a tap right after the Pencil are ignored (palm)", (await visible(I)).length === 3, `${(await visible(I)).length} strokes; board ${JSON.stringify(await box(I))}`);
+  // the student (pointer only) can't undo with a two-finger tap — no touch there; the rule is canDraw
 
   // ---------------- draw-and-hold circle, then the pen resizes it ----------------
   const scaleI = await I.evaluate(() => window.__view.zoomPct / 100);
@@ -312,6 +313,84 @@ try {
     check("resized around its center", Math.abs(ccx - 600) < 6, `center x on screen ${ccx.toFixed(1)}`);
   }
   await S.screenshot({ path: `${OUT}/04-student-resized-circle.png` });
+
+  // ---------------- iPad: fingers only scroll / zoom, the pen writes; a resting hand doesn't move the page ----------------
+  const vmsg = (pg) => pg.evaluate(() => JSON.stringify(window.__view.viewMessage()));
+  const count = async (pg) => (await visible(pg)).length;
+  await I.evaluate(() => window.__view.fitPage());
+  await sleep(800);
+  const n0 = await count(I);
+  let v0 = await vmsg(I);
+  await touch(I, "touchStart", [[700, 500]]);
+  for (let i = 1; i <= 4; i++) { await touch(I, "touchMove", [[700 + i, 500 + i]]); await sleep(30); }
+  await sleep(300);
+  await touch(I, "touchEnd", []);
+  await sleep(300);
+  check("a resting finger doesn't move the page", (await vmsg(I)) === v0 && (await count(I)) === n0);
+  await touch(I, "touchStart", [[700, 500]]);
+  for (let i = 1; i <= 8; i++) { await touch(I, "touchMove", [[700, 500 - i * 15]]); await sleep(16); }
+  await touch(I, "touchEnd", []);
+  await sleep(300);
+  check("a finger drag scrolls the page and never draws", (await vmsg(I)) !== v0 && (await count(I)) === n0);
+  await I.evaluate(() => window.__view.fitPage());
+  await sleep(300);
+  v0 = await vmsg(I);
+  // the hand lands (and slides a bit), then the Pencil writes: the page goes back and stays put
+  await touch(I, "touchStart", [[800, 600]]);
+  for (let i = 1; i <= 5; i++) { await touch(I, "touchMove", [[800, 600 - i * 8]]); await sleep(16); }
+  await pen(I, line(200, 300, 400, 300, 12));
+  await touch(I, "touchMove", [[800, 500]]);
+  await touch(I, "touchEnd", []);
+  check("palm then Pencil: the Pencil writes", await until(async () => (await count(I)) === n0 + 1 && (await count(S)) === n0 + 1));
+  check("palm then Pencil: the page is back where it was and doesn't move", (await vmsg(I)) === v0);
+  // the teacher's computer zooms while the iPad is writing: the iPad stays put
+  await T.evaluate(() => window.__view.zoomBy(1.3));
+  await sleep(900);
+  check("while writing on the iPad, the computer's view doesn't move it", (await vmsg(I)) === v0);
+  await T.evaluate(() => window.__view.fitPage());
+
+  // ---------------- one-finger tap: copy / paste menu, select ink ----------------
+  await sleep(800);
+  const lineId = await I.evaluate(() => {
+    const s = Object.values(window.__board.state.strokes).filter((s) => !s.del && s.tool === "pen").sort((a, b) => b.ts - a.ts)[0];
+    window.__view.select([s.id]);
+    window.__view.copySelection();
+    window.__view.clearSelection();
+    return s.id;
+  });
+  await touch(I, "touchStart", [[900, 250]]);
+  await sleep(60);
+  await touch(I, "touchEnd", []);
+  check("a finger tap on an empty spot opens the menu", await until(() => I.locator(".tap-menu .tapbtn", { hasText: "הדבק" }).isVisible(), 2000));
+  await I.screenshot({ path: `${OUT}/05-ipad-tap-menu.png` });
+  await I.locator(".tap-menu .tapbtn", { hasText: "הדבק" }).click();
+  check("paste puts a copy on the board", await until(async () => (await count(I)) === n0 + 2 && (await count(S)) === n0 + 2));
+  const pasted = (await visible(I)).filter((s) => s.id !== lineId && s.tool === "pen").sort((a, b) => b.ts - a.ts)[0];
+  {
+    const xs = pasted.pts.map((p) => p[0]), ys = pasted.pts.map((p) => p[1]);
+    const [sx, sy] = await toScreen(I, (Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2, pasted.page);
+    check("pasted right where the finger tapped", Math.abs(sx - 900) < 8 && Math.abs(sy - 250) < 8, `${sx.toFixed(1)},${sy.toFixed(1)}`);
+  }
+  check("the pasted copy is selected", await I.evaluate((id) => window.__view.selection.join() === id, pasted.id));
+  await sleep(400);
+  await touch(I, "touchStart", [[900, 470]]);
+  await sleep(60);
+  await touch(I, "touchEnd", []);
+  check("a finger tap on an empty spot clears the selection", await until(() => I.evaluate(() => window.__view.selection.length === 0), 2000));
+  await sleep(400);
+  await touch(I, "touchStart", [[880, 251]]);
+  await sleep(60);
+  await touch(I, "touchEnd", []);
+  check("a finger tap on ink selects it", await until(() => I.evaluate((id) => window.__view.selection.join() === id, pasted.id), 2000));
+  check("…with the copy / delete menu", await I.locator(".sel-menu:not(.tap-menu) .selbar").isVisible());
+
+  // ---------------- portrait pages, and switching to landscape ----------------
+  check("a new board starts with a portrait page", await I.evaluate(() => { const p = window.__board.pages[0]; return p.h > p.w; }));
+  const pid = await T.evaluate(() => { window.__board.setOrientation(false); return window.__board.currentPage.id; });
+  check("landscape reaches every device", await until(async () => {
+    const hs = await Promise.all([T, I, S].map((pg) => pg.evaluate((id) => window.__board.state.pages[id]?.h, pid)));
+    return hs.every((h) => h === 625);
+  }));
 } catch (e) {
   console.log("CRASH", e);
   problems.push("crash: " + e.message);

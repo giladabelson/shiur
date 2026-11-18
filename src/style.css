@@ -392,9 +392,8 @@ a { color: var(--accent); }
 
 .sel-menu { position: absolute; transform: translateX(-50%); z-index: 5; }
 .selbar { display: flex; gap: 4px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 4px 6px; box-shadow: var(--shadow-lg); }
-.board-hint { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(15,23,42,.78); color: #fff; padding: 8px 18px; border-radius: 999px; font-size: 16px; pointer-events: none; opacity: 0; }
-.board-hint.show { animation: board-hint .9s ease-out; }
-@keyframes board-hint { 0% { opacity: 0; } 15% { opacity: 1; } 65% { opacity: 1; } 100% { opacity: 0; } }
+.tapbtn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; border: 0; background: none; border-radius: 8px; font: inherit; font-size: 15px; color: inherit; cursor: pointer; }
+.tapbtn:active { background: var(--line); }
 .priv-badge { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); background: #fff1e6; color: #9a3d0b; border: 1px solid #f6c9a8; padding: 5px 12px; border-radius: 999px; font-size: 13px; pointer-events: none; }
 
 .desmos-dlg { width: min(1100px, calc(100vw - 24px)); height: min(760px, calc(100dvh - 24px)); display: flex; flex-direction: column; gap: 8px; padding: 12px; }
