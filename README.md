@@ -12,6 +12,7 @@ A browser-based private tutoring room: live video call plus a shared pen-friendl
 - One board per lesson: a new lesson never overwrites the previous one, and each lesson is saved as a PDF at the end (see "Lesson PDFs").
 - Students start in pointer-only mode (a laser that appears only when they deliberately move the mouse); the teacher allows writing with one tap.
 - An iPad joins as a third device (pen input, no mic or speaker to avoid echo), connected by QR code (from the home screen, or from "הזמנה" inside the lesson, which also has the student's link, QR and WhatsApp).
+- The student can connect their own iPad too ("חבר אייפד" on the student's screen shows a QR code with a one-time key, so it comes straight in without the waiting room). It writes with the pen only once the teacher allows writing, and then the teacher follows it: the teacher's computer (and iPad, and the student's computer) show exactly the part of the board and the zoom the student's iPad shows, the way the student follows the teacher. Locking the student again hands the lead back to the teacher; a separate toggle ("עוקב אחרי האייפד של התלמיד") turns following on and off on its own. The student's iPad never gets the teacher's private pages, and its mic and speaker are off.
 - Waiting room: a student waits until the teacher (computer or iPad) lets them in or turns them away. It is enforced by the signaling server: nobody sees a waiting student and nothing is relayed to or from them. A browser that was let in goes straight back in after a reload for 12 hours. Roles still come from the link (`?role=teacher` / `?role=ipad`), so anyone who knows those links is not stopped by it.
 - Screen sharing, chat, lesson timer, connection quality indicator, device picker, optional background blur (MediaPipe, served locally).
 - A permanent link per student, sent to the student's WhatsApp in one tap (also the lesson PDFs). Students join from a link with nothing to install.
@@ -88,6 +89,7 @@ node tests/features.mjs          # 24 checks on whiteboard tools
 node tests/user-session.mjs      # "real user" walkthrough with stylus pressure, palm touches, pinch zoom and a PDF worksheet
 node tests/lesson-features.mjs   # scrolling, pointer-only students, live ink order, split view, lesson PDFs, WhatsApp, blur edges
 node tests/waiting-room.mjs      # waiting room (wait, admit, deny, reload, iPad admits) and the in-lesson invite dialog
+node tests/student-ipad.mjs      # the student's own iPad: QR pairing, writes only when allowed, the teacher follows its view
 ```
 
 `npm run dev:cloud` starts a second local server (port 8788) with a simulated R2 bucket, so `node tests/lesson-features.mjs http://127.0.0.1:8788` also checks the cloud upload, list and download.

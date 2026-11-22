@@ -83,6 +83,8 @@ export interface ToolbarOpts {
   openLessons?: () => void;
   /** Teacher: save this lesson's PDF now. */
   saveLessonNow?: () => void;
+  /** Teacher: whether the student's own iPad is in the lesson (then the teacher can follow it). */
+  studentIpad?: () => boolean;
 }
 
 /** Tools a student may use while the teacher hasn't allowed writing (they scroll with wheel / finger). */
@@ -99,7 +101,20 @@ export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
   const zoomBtn = h("button", { class: "zoomlbl", type: "button", title: "זום" });
   const lockBtn = iconBtn("lock", "התלמיד רק מצביע", () => {
     board.setLock(!board.state.lock.on);
-    toast(board.state.lock.on ? "התלמיד יכול רק להצביע עם העכבר" : "התלמיד יכול עכשיו לכתוב על הלוח");
+    const ipad = !!opts.studentIpad?.();
+    // The student writes on their own iPad: letting them write also shows the teacher what they do there.
+    if (ipad) board.setWatch(!board.state.lock.on);
+    toast(board.state.lock.on
+      ? "התלמיד יכול רק להצביע עם העכבר"
+      : ipad ? "התלמיד יכול לכתוב. אתה רואה את מה שהוא עושה באייפד שלו" : "התלמיד יכול עכשיו לכתוב על הלוח");
+  });
+  // Teacher: show what the student's own iPad shows (its scrolling and zoom), like the student follows the teacher.
+  const watchBtn = h("button", { class: "followbtn watchbtn", type: "button", hidden: true }, icon("ipad", 18), h("span", null, "עוקב אחרי האייפד של התלמיד"));
+  watchBtn.addEventListener("click", () => {
+    const on = !board.watchOn;
+    board.setWatch(on);
+    toast(on ? "אתה רואה את מה שהתלמיד רואה באייפד שלו" : "הפסקת לעקוב אחרי האייפד של התלמיד");
+    refresh();
   });
   const followBtn = h("button", { class: "followbtn", type: "button" }, icon("eye", 18), h("span", null, "התלמיד עוקב אחרי הזום שלי"));
   followBtn.addEventListener("click", () => {
@@ -405,7 +420,7 @@ export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
       pageMenuBtn,
     ),
     h("div", { class: "tgroup" }, fileMenuBtn, pdfBtn, zoomBtn),
-    opts.isTeacher ? h("div", { class: "tgroup" }, followBtn, lockBtn) : null,
+    opts.isTeacher ? h("div", { class: "tgroup" }, watchBtn, followBtn, lockBtn) : null,
   );
 
   const bar = h("div", { class: "toolbar", role: "toolbar", "aria-label": "כלי הלוח" }, row1, optsRow, fileInput);
@@ -427,6 +442,14 @@ export function buildToolbar(board: Board, view: BoardView, opts: ToolbarOpts) {
     followBtn.title = following
       ? "התלמיד רואה את הלוח בדיוק כמוך (זום ומיקום). לחץ כדי שיזיז בעצמו"
       : "התלמיד מזיז ומגדיל את הלוח בעצמו. לחץ כדי שיעקוב אחרי הזום שלך";
+    const watching = board.watchOn;
+    watchBtn.hidden = !watching && !opts.studentIpad?.();
+    watchBtn.classList.toggle("on", watching);
+    watchBtn.setAttribute("aria-pressed", String(watching));
+    watchBtn.title = watching
+      ? "אתה רואה את מה שהתלמיד רואה באייפד שלו (זום ומיקום). לחץ כדי להפסיק"
+      : "לחץ כדי לראות את מה שהתלמיד רואה באייפד שלו (זום ומיקום)";
+    followBtn.hidden = watching;
     // Student: drawing tools (and their options) are greyed out until the teacher allows writing.
     if (!opts.isStaff) {
       for (const [id, b] of toolBtns) b.disabled = locked && !POINT_TOOLS.includes(id);

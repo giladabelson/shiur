@@ -1,7 +1,7 @@
 // Room orchestration: signaling + one PeerLink per remote device (full mesh, at most a few devices).
 
 import { PeerLink } from "./peer";
-import { Signaling, type PeerInfo, type PendingInfo, type Role, type SignalMsg, type SignalingState } from "./signaling";
+import { Signaling, isStudentSide, type PeerInfo, type PendingInfo, type Role, type SignalMsg, type SignalingState } from "./signaling";
 import type { LocalMedia } from "./media";
 
 export interface RemoteState {
@@ -77,6 +77,9 @@ export class Room {
   onPending: (list: PendingInfo[]) => void = () => {};
   /** Teacher devices: a student couldn't be let in (the room is full). */
   onAdmitFailed: (peerId: string) => void = () => {};
+  /** Student's computer: the key its own iPad joins with (from the server, once let in). */
+  onPairToken: (token: string) => void = () => {};
+  pairToken = "";
   lobby: LobbyState = { kind: "connecting" };
   pending: PendingInfo[] = [];
 
@@ -92,6 +95,9 @@ export class Room {
     this.forceRelay = new URLSearchParams(location.search).has("relay");
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const q = new URLSearchParams({ peerId: this.peerId, sessionId: this.sessionId, role, name, client: clientId() });
+    // The student's iPad: the key from the student's QR code lets it in without the waiting room.
+    const pair = new URLSearchParams(location.search).get("pair");
+    if (role === "sipad" && pair) q.set("pair", pair);
     this.sig = new Signaling(`${proto}//${location.host}/api/ws/${encodeURIComponent(roomId)}?${q}`);
     this.sig.onMessage = (m) => this.handleSignal(m);
     this.sig.onState = (s) => this.onSignaling(s);
@@ -127,6 +133,11 @@ export class Room {
   /** Teacher devices: turn a waiting student away. */
   deny(peerId: string) {
     this.sig.send({ type: "deny", peerId });
+  }
+
+  /** Student's computer: ask the server for the key that lets this student's iPad in. */
+  requestPairToken() {
+    this.sig.send({ type: "pair" });
   }
 
   private setLobby(s: LobbyState) {
@@ -166,11 +177,11 @@ export class Room {
 
   /** staffOnly: skip students (used for the teacher's private pages). */
   broadcastOps(msg: object, staffOnly = false) {
-    for (const p of this.peers.values()) if (!staffOnly || p.info.role !== "student") p.link.sendOps(msg);
+    for (const p of this.peers.values()) if (!staffOnly || !isStudentSide(p.info.role)) p.link.sendOps(msg);
   }
 
   broadcastLive(msg: object, staffOnly = false) {
-    for (const p of this.peers.values()) if (!staffOnly || p.info.role !== "student") p.link.sendLive(msg);
+    for (const p of this.peers.values()) if (!staffOnly || !isStudentSide(p.info.role)) p.link.sendLive(msg);
   }
 
   private handleSignal(m: SignalMsg) {
@@ -185,6 +196,12 @@ export class Room {
       case "pending":
         this.pending = Array.isArray(m.list) ? m.list : [];
         this.onPending(this.pending);
+        break;
+      case "pair":
+        if (typeof m.token === "string") {
+          this.pairToken = m.token;
+          this.onPairToken(m.token);
+        }
         break;
       case "admit-failed":
         this.onAdmitFailed(m.peerId);

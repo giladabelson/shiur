@@ -11,6 +11,7 @@
     "test:features": "node tests/features.mjs",
     "test:session": "node tests/user-session.mjs",
     "test:lesson": "node tests/lesson-features.mjs",
+    "test:student-ipad": "node tests/student-ipad.mjs",
     "dev:cloud": "npm run build && wrangler dev -c tests/wrangler.r2.jsonc --port 8788"
   },
   "devDependencies": {

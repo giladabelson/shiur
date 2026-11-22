@@ -8,7 +8,7 @@ const m = location.pathname.match(/^\/r\/([\w-]{6,64})\/?$/);
 
 if (m) {
   const r = new URLSearchParams(location.search).get("role");
-  const role: Role = r === "teacher" || r === "ipad" ? r : "student";
+  const role: Role = r === "teacher" || r === "ipad" || r === "sipad" ? r : "student";
   renderLesson(root, m[1], role);
 } else {
   renderHome(root);

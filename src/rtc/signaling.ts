@@ -1,6 +1,10 @@
 // WebSocket signaling client: auto-reconnect with backoff, heartbeat, and an outbox while offline.
 
-export type Role = "teacher" | "student" | "ipad";
+/** sipad: the student's own iPad (a pen surface on the student's side: no private pages, writes only when allowed). */
+export type Role = "teacher" | "student" | "ipad" | "sipad";
+
+/** The student's devices (the computer and their own iPad): they never get the teacher's private pages. */
+export const isStudentSide = (r: string) => r === "student" || r === "sipad";
 
 export interface PeerInfo {
   peerId: string;
@@ -23,6 +27,8 @@ export type SignalMsg =
   | { type: "pending"; list: PendingInfo[] }
   | { type: "admit-failed"; peerId: string; reason: string }
   | { type: "denied" }
+  // a student's computer: a one-time key that lets their own iPad straight in (no waiting room)
+  | { type: "pair"; token: string }
   | { type: "peer-joined"; peer: PeerInfo }
   | { type: "peer-left"; peerId: string; sessionId: string }
   | { type: "signal"; from: string; fromSession: string; fromRole: Role; fromName: string; data: any };

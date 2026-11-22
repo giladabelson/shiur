@@ -256,6 +256,9 @@ a { color: var(--accent); }
 .followbtn svg { flex-shrink: 0; }
 .followbtn:hover { background: var(--hover); }
 .followbtn.on { background: var(--accent-soft); color: var(--accent2); box-shadow: inset 0 0 0 1px #b9c8f0; }
+.followbtn[hidden] { display: none; }
+/* teacher: "I follow the student's iPad" */
+.watchbtn.on { background: #e3f6ea; color: #13703a; box-shadow: inset 0 0 0 1px #9fd9b4; }
 
 /* second row: options of the selected tool */
 .tb-opts { padding: 3px 8px 4px; background: var(--paper2); border-top: 1px solid var(--line); min-height: 50px; }

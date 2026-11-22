@@ -4,7 +4,7 @@ import { Board } from "../board/board";
 import { BoardView } from "../board/view";
 import { LocalMedia, listDevices, savePrefs, canShareScreen } from "../rtc/media";
 import { Room, type Peer, type LobbyState } from "../rtc/room";
-import type { PendingInfo, Role } from "../rtc/signaling";
+import { isStudentSide, type PendingInfo, type Role } from "../rtc/signaling";
 import { buildToolbar } from "./toolbar";
 import { buildSidePanel, type SidePanel } from "./sidepanel";
 import { saveLessonPdf, tidyLessons } from "./lessons";
@@ -13,18 +13,23 @@ import { hasContent } from "../board/model";
 import { downloadBlob } from "../board/export";
 import { h, icon, iconBtn, toast, clear, fmtDuration } from "./dom";
 import { askPhone } from "./phone-dialog";
-import { inviteText, openWhatsApp, studentByRoom } from "./students";
+import { inviteText, openWhatsApp, roomUrl, studentByRoom } from "./students";
 import { isTouchDevice, reserveTab, sendPdfToStudent } from "./send-pdf";
-import { inviteDialog } from "./invite";
+import { inviteDialog, studentIpadDialog } from "./invite";
 
-const ROLE_TITLE: Record<Role, string> = { teacher: "מורה", student: "תלמיד", ipad: "אייפד" };
+const ROLE_TITLE: Record<Role, string> = { teacher: "מורה", student: "תלמיד", ipad: "אייפד", sipad: "האייפד של התלמיד" };
+/** Pen tablets (the teacher's iPad, the student's own iPad): no mic or speaker, so there is no echo with the computer next to them. */
+const isTablet = (r: string) => r === "ipad" || r === "sipad";
 
 export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
   const media = new LocalMedia();
-  const wantsAv = role !== "ipad";
+  const wantsAv = !isTablet(role);
   let micOn = wantsAv;
   let camOn = wantsAv;
-  let name = localStorage.getItem("shiur.name." + role) || (role === "teacher" ? "המורה" : role === "ipad" ? "אייפד" : "");
+  // The student's iPad gets the student's name from the QR code on the student's computer.
+  const pairedName = (new URLSearchParams(location.search).get("nm") ?? "").trim().slice(0, 30);
+  let name = localStorage.getItem("shiur.name." + role)
+    || (role === "teacher" ? "המורה" : role === "ipad" ? "אייפד" : role === "sipad" ? (pairedName ? `האייפד של ${pairedName}` : "האייפד של התלמיד") : "");
 
   document.title = role === "student" ? "שיעור" : `שיעור (${ROLE_TITLE[role]})`;
   document.documentElement.classList.remove("on-home");
@@ -108,17 +113,19 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
         void enterCall();
       },
     },
-      h("h1", null, role === "ipad" ? "חיבור האייפד לשיעור" : "בדיקה לפני השיעור"),
-      role === "ipad"
+      h("h1", null, role === "ipad" ? "חיבור האייפד לשיעור" : role === "sipad" ? "חיבור האייפד שלך לשיעור" : "בדיקה לפני השיעור"),
+      isTablet(role)
         ? h("div", { class: "muted ipad-tips" },
-          h("p", null, "באייפד המיקרופון והרמקול כבויים כדי שלא יהיה הד עם המחשב. כאן כותבים על הלוח עם העט."),
+          h("p", null, role === "sipad"
+            ? "באייפד המיקרופון והרמקול כבויים כדי שלא יהיה הד עם המחשב. כשהמורה יאשר, כותבים כאן על הלוח עם העט, והמורה רואה את מה שאתה עושה."
+            : "באייפד המיקרופון והרמקול כבויים כדי שלא יהיה הד עם המחשב. כאן כותבים על הלוח עם העט."),
           h("p", null, "חשוב: כדי שהעט לא יפספס קווים, כבה את Scribble: הגדרות ← Apple Pencil ← Scribble (כבוי)."),
           h("p", null, "טיפ: נעילה אוטומטית ← אף פעם, והאייפד מחובר לחשמל."),
         )
         : null,
       h("div", { class: "preview-wrap" }, preview, meter),
       h("label", { class: "field" }, h("span", null, "שם"), nameInput),
-      h("div", { class: "row" }, micBtn, camBtn, role !== "ipad" ? blurBtn : null),
+      h("div", { class: "row" }, micBtn, camBtn, !isTablet(role) ? blurBtn : null),
       h("label", { class: "field" }, h("span", null, "מיקרופון"), micSel),
       h("label", { class: "field" }, h("span", null, "מצלמה"), camSel),
       err,
@@ -137,7 +144,8 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       broadcastOps: (m, staffOnly) => room.broadcastOps(m, staffOnly),
       broadcastLive: (m, staffOnly) => room.broadcastLive(m, staffOnly),
       sendTo: async (peerId, m) => room.peers.get(peerId)?.link.sendOpsPaced(m) ?? false,
-      peerIsStudent: (peerId) => room.peers.get(peerId)?.info.role === "student",
+      peerIsStudent: (peerId) => isStudentSide(room.peers.get(peerId)?.info.role ?? ""),
+      peerRole: (peerId) => room.peers.get(peerId)?.info.role,
     });
     (window as any).__board = board;
     board.onNotice = (t) => toast(t);
@@ -154,7 +162,7 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
     (window as any).__view = view;
     view.canDraw = () => board.canDraw(role);
     // Teacher / iPad: fingers only scroll and zoom, the pen writes. A student without a pen may write with a finger.
-    view.fingersDraw = role === "student";
+    view.fingersDraw = isStudentSide(role);
 
     // split view: a file pinned next to the board (never on the iPad)
     const sideInput = h("input", { type: "file", accept: "application/pdf,image/*", hidden: true }) as HTMLInputElement;
@@ -165,7 +173,7 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       if (f.size > 40 * 1024 * 1024) return toast("הקובץ גדול מדי (עד 40MB)");
       try { await board.setSideFile(f); } catch (e) { console.error(e); toast("לא הצלחתי לפתוח את הקובץ"); }
     });
-    const side: SidePanel | null = role === "ipad" ? null : buildSidePanel(board, { isTeacher: role === "teacher", pickFile: () => sideInput.click() });
+    const side: SidePanel | null = isTablet(role) ? null : buildSidePanel(board, { isTeacher: role === "teacher", pickFile: () => sideInput.click() });
     (window as any).__side = side;
 
     const saveNow = async () => {
@@ -179,16 +187,31 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
         toast("לא הצלחתי לשמור PDF");
       }
     };
+    /** The student's own iPad is in the lesson. */
+    const studentIpadHere = () => [...room.peers.values()].some((p) => p.info.role === "sipad");
     const toolbar = buildToolbar(board, view, {
       isTeacher: role === "teacher", isStaff: role !== "student", roomName,
       pickSideFile: role === "teacher" ? () => sideInput.click() : undefined,
       openLessons: role === "teacher" ? () => openLessonsDialog(roomId, roomName.replace(/^שיעור-?/, "") || "השיעור") : undefined,
       saveLessonNow: role === "teacher" ? () => void saveNow() : undefined,
+      studentIpad: role === "teacher" ? () => studentIpadHere() : undefined,
     });
     let lastLock = board.state.lock.on;
     // The teacher's view (scroll / zoom) arrives: show the same part of the board.
     board.onRemoteView = (v) => view.applyRemoteView(v);
     board.onFollowEnabled = () => view.sendViewNow();
+    // The teacher started / stopped following the student's iPad.
+    board.onWatchChanged = (on) => {
+      if (on) {
+        if (role === "sipad") view.sendViewNow(); // everyone catches up with this iPad right away
+        return;
+      }
+      // Back to the teacher leading: let go of the iPad's view, and the teacher's computer sends its own.
+      view.forgetFollowed();
+      const teacherHere = [...room.peers.values()].some((q) => q.info.role === "teacher");
+      if (role === "teacher" || (role === "ipad" && !teacherHere)) view.sendViewNow();
+      if (role === "sipad") toast("המורה כבר לא עוקב אחרי האייפד שלך");
+    };
     board.onChange = (what, strokeId) => {
       view.invalidate(what, strokeId);
       if (what !== "live" && what !== "stroke") {
@@ -198,7 +221,9 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       if (what === "lock") {
         updateLockBanner();
         // "lock" also reports the follow-the-teacher switch: only announce real lock changes.
-        if (role === "student" && board.state.lock.on !== lastLock) toast(board.state.lock.on ? "אפשר רק להצביע עם העכבר" : "המורה אישר: אפשר לכתוב על הלוח");
+        if (isStudentSide(role) && board.state.lock.on !== lastLock) {
+          toast(board.state.lock.on ? (role === "sipad" ? "אפשר רק להצביע" : "אפשר רק להצביע עם העכבר") : "המורה אישר: אפשר לכתוב על הלוח");
+        }
         lastLock = board.state.lock.on;
       }
       if (what === "lesson") {
@@ -221,8 +246,9 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
     let started = Date.now();
     const timerEl = h("span", { class: "timer", title: "זמן השיעור" }, "00:00");
     const netEl = h("span", { class: "net" });
-    const lockBanner = h("div", { class: "lockbanner", hidden: true }, icon("laser", 16), " אפשר להצביע עם העכבר. כדי לכתוב, המורה צריך לאשר");
-    const updateLockBanner = () => { lockBanner.hidden = !(role === "student" && board.state.lock.on); };
+    const lockBanner = h("div", { class: "lockbanner", hidden: true }, icon("laser", 16),
+      role === "sipad" ? " אפשר להצביע עם העט. כדי לכתוב, המורה צריך לאשר" : " אפשר להצביע עם העכבר. כדי לכתוב, המורה צריך לאשר");
+    const updateLockBanner = () => { lockBanner.hidden = !(isStudentSide(role) && board.state.lock.on); };
     updateLockBanner();
 
     // stage: board or a shared screen
@@ -242,7 +268,7 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
     const selfVideo = h("video", { class: "mirror", autoplay: true, playsInline: true, muted: true });
     const selfTile = h("div", { class: "tile self" }, selfVideo, h("div", { class: "tile-name" }, `${name} (אני)`));
     const audioBox = h("div", { hidden: true });
-    let speakerOn = role !== "ipad";
+    let speakerOn = !isTablet(role);
     let speakerSink = "";
 
     // chat
@@ -337,7 +363,7 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       }
       void media.startScreen().then((e) => {
         if (e) toast(e);
-        if (media.screen) toast(role === "ipad" ? "מסך האייפד משותף. אפשר לעבור לאפליקציה אחרת." : "המסך משותף");
+        if (media.screen) toast(isTablet(role) ? "מסך האייפד משותף. אפשר לעבור לאפליקציה אחרת." : "המסך משותף");
         room.syncLocal();
         drawControls();
       });
@@ -362,7 +388,7 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       blurCtl.classList.toggle("on", media.blurOn);
       blurCtl.hidden = !media.cam;
       screenCtl.classList.toggle("on", !!media.screen);
-      screenCtl.title = media.screen ? "הפסק שיתוף" : role === "ipad" ? "שתף את מסך האייפד" : "שתף מסך או חלון";
+      screenCtl.title = media.screen ? "הפסק שיתוף" : isTablet(role) ? "שתף את מסך האייפד" : "שתף מסך או חלון";
       speakerCtl.replaceChildren(icon(speakerOn ? "speaker" : "speakerOff"));
       speakerCtl.classList.toggle("off", !speakerOn);
       selfVideo.srcObject = media.cam ? new MediaStream([media.cam]) : null;
@@ -377,14 +403,14 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
 
     const controls = h("footer", { class: "controls" },
       micCtl, camCtl,
-      role !== "ipad" ? blurCtl : null,
-      role === "ipad" ? flipCtl : null,
+      !isTablet(role) ? blurCtl : null,
+      isTablet(role) ? flipCtl : null,
       canShareScreen() ? screenCtl : null,
       speakerCtl, chatCtl,
-      role === "ipad" ? tilesCtl : null,
+      isTablet(role) ? tilesCtl : null,
       infoCtl, leaveCtl,
     );
-    if (role === "ipad") tiles.hidden = true;
+    if (isTablet(role)) tiles.hidden = true;
 
     // Teacher: the student's link (copy / WhatsApp / QR) and the iPad's QR, any time during the lesson.
     const inviteBtn = role === "teacher"
@@ -393,9 +419,27 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
         onclick: () => inviteDialog(roomId, roomName.replace(/^שיעור-?/, "")),
       }, icon("share", 16), " הזמנה")
       : null;
+    // Student: connect their own iPad (a QR code to scan with it). The teacher then sees what they do there.
+    const ipadBtn = role === "student"
+      ? h("button", {
+        class: "btn ghost small-btn invite-btn student-ipad-btn", type: "button", title: "לכתוב על הלוח מהאייפד שלך",
+        onclick: () => {
+          if (room.lobby.kind !== "admitted") return toast("אפשר לחבר אייפד אחרי שהמורה מכניס אותך לשיעור");
+          room.requestPairToken();
+          const pairUrl = (token: string) => {
+            const u = new URL(roomUrl(roomId, "sipad"));
+            u.searchParams.set("pair", token);
+            if (name) u.searchParams.set("nm", name);
+            return u.toString();
+          };
+          const dlg = studentIpadDialog();
+          room.onPairToken = (t) => dlg.setUrl(pairUrl(t));
+        },
+      }, icon("ipad", 16), " חבר אייפד")
+      : null;
     const topbar = h("header", { class: "topbar" },
       h("strong", null, role === "student" ? "שיעור" : `שיעור · ${ROLE_TITLE[role]}`),
-      timerEl, netEl, inviteBtn,
+      timerEl, netEl, inviteBtn, ipadBtn,
     );
     const statusText = h("span");
     // Teacher waiting for the student: open the student's WhatsApp chat with the lesson link.
@@ -415,8 +459,8 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
 
     // waiting room: the student waits here until the teacher lets them in; the teacher's devices
     // get a notice with "let in" / "turn away" for everyone waiting.
-    const waiting = role === "student" ? waitingScreen(name, media) : null;
-    const lobby = role !== "student" ? lobbyNotice((id) => room.admit(id), (id) => room.deny(id)) : null;
+    const waiting = isStudentSide(role) ? waitingScreen(name, media) : null;
+    const lobby = !isStudentSide(role) ? lobbyNotice((id) => room.admit(id), (id) => room.deny(id)) : null;
 
     clear(root);
     document.documentElement.classList.add("in-lesson");
@@ -472,7 +516,7 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
         setSrc(t.audio, rt.mic);
         t.nameEl.textContent = p.info.name || ROLE_TITLE[p.info.role];
         t.tile.classList.toggle("nocam", !p.state.cam || !rt.cam);
-        t.tile.hidden = p.info.role === "ipad" && !p.state.cam;
+        t.tile.hidden = isTablet(p.info.role) && !p.state.cam;
         t.micIcon.hidden = p.state.mic;
         const q = p.link.quality;
         const conn = p.link.state;
@@ -511,13 +555,33 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       boardWrap.hidden = !!sel;
       screenWrap.hidden = !sel;
       setSrc(screenVideo, sel ? screenOf(sel) : undefined);
+      onStudentIpad();
       updateStatus();
+    };
+
+    // The student's own iPad came or went.
+    let hadStudentIpad = false;
+    const onStudentIpad = () => {
+      const here = studentIpadHere();
+      if (here === hadStudentIpad) return;
+      hadStudentIpad = here;
+      if (ipadBtn) {
+        ipadBtn.classList.toggle("on", here);
+        ipadBtn.replaceChildren(icon("ipad", 16), here ? " האייפד מחובר" : " חבר אייפד");
+      }
+      if (role !== "teacher") return;
+      if (here) {
+        toast("התלמיד חיבר את האייפד שלו");
+        // The student may already write: follow what they do on their iPad.
+        if (!board.state.lock.on) board.setWatch(true);
+      } else if (board.watchOn) board.setWatch(false);
+      toolbar.refresh();
     };
 
     const updateStatus = () => {
       const peers = [...room.peers.values()];
       const connected = peers.filter((p) => p.link.state === "connected");
-      const others = connected.filter((p) => p.info.role !== "ipad" || role === "ipad");
+      const others = connected.filter((p) => !isTablet(p.info.role) || isTablet(role));
       let text = "";
       if (room.signalingState !== "open" && connected.length === 0) text = "מתחבר לשרת…";
       else if (peers.some((p) => p.link.state !== "connected" && p.link.state !== "new")) text = "החיבור נחלש, מתחבר מחדש…";
@@ -534,7 +598,7 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
     room.onSignaling = updateStatus;
     room.onLobby = (st) => {
       waiting?.show(st);
-      if (st.kind === "admitted" && role === "student") {
+      if (st.kind === "admitted" && isStudentSide(role)) {
         started = Date.now(); // the lesson starts when the teacher lets the student in
         playAll();
       }
@@ -549,6 +613,11 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
       await board.sendSnapshot(p.info.peerId);
       // Someone (re)joined: show them what the teacher is looking at. The computer does this;
       // the iPad only when the computer isn't in the lesson.
+      if (board.watchOn) {
+        // The teacher follows the student's iPad: it shows the newcomer where it is.
+        if (role === "sipad") view.sendViewNow(p.info.peerId);
+        return;
+      }
       const teacherHere = [...room.peers.values()].some((q) => q.info.role === "teacher");
       if (role === "teacher" || (role === "ipad" && !teacherHere)) view.sendViewNow(p.info.peerId);
     })();
