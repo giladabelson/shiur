@@ -11,7 +11,8 @@ export interface Env {
   LESSON_KEEP_DAYS?: string;
 }
 
-type Role = "teacher" | "student" | "ipad";
+/** sipad: the student's own iPad. Like the student, it is not staff. */
+type Role = "teacher" | "student" | "ipad" | "sipad";
 interface Att {
   peerId: string;
   sessionId: string;
@@ -50,6 +51,8 @@ const MAX_WAITING = 12;
 const ADMIT_TTL = 12 * 3600_000;
 const isStaff = (r: Role) => r === "teacher" || r === "ipad";
 const ID_RE = /^[\w-]{6,64}$/;
+/** The key in the student's "connect your iPad" QR code: lets that iPad in without the waiting room. */
+const PAIR_RE = /^[a-f0-9]{32}$/;
 const TURN_TTL = 6 * 3600;
 
 export default {
@@ -252,6 +255,24 @@ export class Room extends DurableObject<Env> {
     return true;
   }
 
+  /** A key for the student's own iPad (asked for by a student's computer that was let in). */
+  private async newPair(): Promise<string> {
+    const b = crypto.getRandomValues(new Uint8Array(16));
+    const token = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+    await this.ctx.storage.put(`pair:${token}`, Date.now());
+    const old: string[] = [];
+    for (const [k, v] of await this.ctx.storage.list<number>({ prefix: "pair:" })) {
+      if (Date.now() - v > ADMIT_TTL) old.push(k);
+    }
+    if (old.length) await this.ctx.storage.delete(old.slice(0, 128));
+    return token;
+  }
+
+  private async validPair(token: string): Promise<boolean> {
+    const at = await this.ctx.storage.get<number>(`pair:${token}`);
+    return !!at && Date.now() - at <= ADMIT_TTL;
+  }
+
   private async rememberAdmitted(clientId: string) {
     await this.ctx.storage.put(`admit:${clientId}`, Date.now());
     // Forget old admissions (a room is reused for every lesson with the same student).
@@ -275,7 +296,7 @@ export class Room extends DurableObject<Env> {
     const peerId = q.get("peerId") ?? "";
     const sessionId = q.get("sessionId") ?? "";
     const roleParam = q.get("role");
-    const role: Role = roleParam === "teacher" || roleParam === "ipad" ? roleParam : "student";
+    const role: Role = roleParam === "teacher" || roleParam === "ipad" || roleParam === "sipad" ? roleParam : "student";
     const name = (q.get("name") ?? "").slice(0, 40);
     if (!ID_RE.test(peerId) || !ID_RE.test(sessionId)) {
       return new Response("bad ids", { status: 400 });
@@ -292,7 +313,11 @@ export class Room extends DurableObject<Env> {
       replaced = true;
     }
 
-    const admitted = isStaff(role) || (await this.wasAdmitted(clientId));
+    // The student's own iPad, opened from the QR code on the student's screen (which the teacher let in).
+    const pairKey = q.get("pair") ?? "";
+    const paired = role === "sipad" && PAIR_RE.test(pairKey) && (await this.validPair(pairKey));
+    if (paired) await this.rememberAdmitted(clientId);
+    const admitted = isStaff(role) || paired || (await this.wasAdmitted(clientId));
     if (admitted && this.attachments(peerId).length >= MAX_PEERS) return new Response("room full", { status: 403 });
     if (!admitted && this.pendingList().length >= MAX_WAITING) return new Response("room full", { status: 403 });
 
@@ -330,6 +355,12 @@ export class Room extends DurableObject<Env> {
         const ta = t.deserializeAttachment() as Att | null;
         if (ta?.admitted) send(t, out); // ...and nothing is relayed to them either
       }
+      return;
+    }
+
+    // A student's computer (in the lesson) asks for the key its own iPad joins with.
+    if (msg.type === "pair" && from.role === "student") {
+      send(ws, JSON.stringify({ type: "pair", token: await this.newPair() }));
       return;
     }
 

@@ -520,7 +520,7 @@ export class BoardView {
       c.width = Math.round(this.cssW * this.dpr);
       c.height = Math.round(this.cssH * this.dpr);
     }
-    if (this.followed && !this.busy && this.board.followOn && this.layout.has(this.followed.page)) {
+    if (this.followed && !this.busy && this.board.followsOthers && this.layout.has(this.followed.page)) {
       // Following the teacher: keep showing the same region when this window changes size.
       this.applyRemoteView(this.followed);
       return;
@@ -644,7 +644,7 @@ export class BoardView {
 
   /** Teacher's devices: send the view while it moves (throttled) and once more when it settles. */
   private queueViewSend() {
-    if (!this.board.isStaff || !this.board.followOn) return;
+    if (!this.board.sendsView) return;
     const now = performance.now();
     if (now - this.viewSentAt >= VIEW_SEND_MS) this.sendViewNow();
     clearTimeout(this.viewSettle);
@@ -658,6 +658,12 @@ export class BoardView {
     if (m) this.board.sendView(m, peerId);
   }
 
+  /** Stop holding on to the last view that came from another device (it no longer leads). */
+  forgetFollowed() {
+    this.followed = null;
+    this.pendingView = null;
+  }
+
   /** True while the user is drawing, selecting or moving the board on this device. */
   private get busy() {
     return !!(this.drawing || this.lasso || this.selDrag || this.erasing || this.panning || this.gesture || this.touches.size);
@@ -666,7 +672,11 @@ export class BoardView {
   /** Show the same part of the board as the teacher (never sent on: no loops). */
   applyRemoteView(v: ViewMsg) {
     // While writing here (e.g. on the iPad between strokes), the other device's view never moves the page.
-    if (this.busy || (this.board.isStaff && performance.now() - this.localAt < LOCAL_HOLD_MS)) return;
+    if (this.busy || (this.board.role !== "student" && performance.now() - this.localAt < LOCAL_HOLD_MS)) {
+      // The student's iPad catches up with the teacher once the student stops writing here.
+      if (this.board.role === "sipad" && this.pendingView?.v !== v) this.pendingView = { v, at: performance.now() };
+      return;
+    }
     const top = this.board.state === this.stateRef ? this.topOf(v.page) : undefined;
     if (top === undefined || this.cssW <= 1 || this.cssH <= 1) {
       // The page hasn't arrived yet (or the board is hidden): apply it when it can be.

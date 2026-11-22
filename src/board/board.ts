@@ -6,6 +6,7 @@ import {
 } from "./model";
 import { loadBoard, saveBoard, loadAsset, saveAsset, hashBytes, toB64, fromB64 } from "./store";
 import { pdfPageSizes, imageSize, assetArrived } from "./pdf";
+import { isStudentSide } from "../rtc/signaling";
 
 export interface BoardTransport {
   /** staffOnly: send only to the teacher's devices (teacher + iPad), never to students. */
@@ -13,6 +14,8 @@ export interface BoardTransport {
   broadcastLive(msg: object, staffOnly?: boolean): void;
   sendTo(peerId: string, msg: object): Promise<boolean>;
   peerIsStudent(peerId: string): boolean;
+  /** The role of a connected peer ("teacher", "student", "ipad", "sipad"). */
+  peerRole(peerId: string): string | undefined;
 }
 
 export interface LiveStroke {
@@ -81,7 +84,7 @@ export const FRESH_GAP_MS = 10 * 60 * 1000;
 /** A teacher device with no saved board waits this long for a lesson already running on another device. */
 const ADOPT_WAIT_MS = 4000;
 /** State-changing ops are tagged with the lesson id, so ink from an old lesson never leaks into a new one. */
-const LESSON_OPS = new Set(["b.page", "b.stroke", "b.vis", "b.upd", "b.tpl", "b.go", "b.lock", "b.follow", "b.side"]);
+const LESSON_OPS = new Set(["b.page", "b.stroke", "b.vis", "b.upd", "b.tpl", "b.go", "b.lock", "b.follow", "b.watch", "b.side"]);
 
 /** Board state as stored on this device, with the time of the last change. */
 type Saved = BoardState & { act?: number };
@@ -137,11 +140,14 @@ export class Board {
   onRemoteView: (v: ViewMsg) => void = () => {};
   /** This device just turned "follow the teacher" on: send our view so everyone catches up. */
   onFollowEnabled: () => void = () => {};
+  /** "The teacher follows the student's iPad" was turned on or off (here or on another device). */
+  onWatchChanged: (on: boolean) => void = () => {};
 
   constructor(readonly roomId: string, readonly me: string, readonly role: string, private net: BoardTransport) {}
 
+  /** The teacher's devices (computer and iPad). The student's computer and iPad are not. */
   get isStaff() {
-    return this.role !== "student";
+    return !isStudentSide(this.role);
   }
 
   get lesson(): LessonInfo {
@@ -257,6 +263,10 @@ export class Board {
   private notify(op: BoardOp) {
     if (op.t === "b.go") this.onChange("page");
     else if (op.t === "b.lock" || op.t === "b.follow") this.onChange("lock");
+    else if (op.t === "b.watch") {
+      this.onChange("lock");
+      this.onWatchChanged(op.on);
+    }
     else if (op.t === "b.side") this.onChange("side");
     else if (op.t === "b.stroke") this.onChange("stroke", op.s.id);
     else this.onChange("all");
@@ -394,7 +404,7 @@ export class Board {
 
   // ---------- strokes ----------
   canDraw(role: string) {
-    return role === "teacher" || role === "ipad" || !this.state.lock.on;
+    return !isStudentSide(role) || !this.state.lock.on;
   }
 
   setLock(on: boolean) {
@@ -411,9 +421,38 @@ export class Board {
     if (on) this.onFollowEnabled();
   }
 
-  /** Teacher's devices: tell everyone (or one peer) what part of the board is on screen. */
+  /**
+   * Whether the teacher follows the student's own iPad: then the student's iPad leads, and every
+   * other device (the teacher's computer and iPad, the student's computer) shows what it shows.
+   */
+  get watchOn(): boolean {
+    return this.state.watch?.on ?? false;
+  }
+
+  setWatch(on: boolean) {
+    if (on === this.watchOn) return;
+    this.local({ t: "b.watch", on, ts: Math.max(Date.now(), (this.state.watch?.ts ?? 0) + 1) });
+  }
+
+  /** Whether this device shows what another device leads with (the teacher's, or the student's iPad). */
+  get followsOthers(): boolean {
+    return this.watchOn ? this.role !== "sipad" : this.followOn;
+  }
+
+  /** Whether this device's scrolling and zoom lead the others right now. */
+  get sendsView(): boolean {
+    return this.watchOn ? this.role === "sipad" : this.isStaff && this.followOn;
+  }
+
+  /** Tell everyone (or one peer) what part of the board is on screen: the teacher's devices, or the student's iPad while the teacher follows it. */
   sendView(v: ViewMsg, peerId?: string) {
-    if (!this.isStaff || !this.followOn || !this.state.pages[v.page]) return;
+    if (!this.sendsView || !this.state.pages[v.page]) return;
+    if (this.role === "sipad") {
+      const msg = { t: "b.view", page: v.page, cx: v.cx, cy: v.cy, w: v.w, h: v.h };
+      if (peerId) void this.net.sendTo(peerId, msg);
+      else this.net.broadcastLive(msg);
+      return;
+    }
     const priv = isPrivate(this.state, v.page);
     const msg = { t: "b.view", page: v.page, cx: v.cx, cy: v.cy, w: v.w, h: v.h };
     if (peerId) {
@@ -772,7 +811,7 @@ export class Board {
     const needed = new Set<string>();
     for (const p of this.pages) if (p.bg) needed.add(p.bg.asset);
     // The iPad is a writing surface only: it never shows the side file, so it doesn't download it.
-    if (this.state.side && this.role !== "ipad") needed.add(this.state.side.asset);
+    if (this.state.side && this.role !== "ipad" && this.role !== "sipad") needed.add(this.state.side.asset);
     for (const id of needed) {
       if (this.haveAssets.has(id)) continue;
       if (await loadAsset(id)) {
@@ -926,11 +965,16 @@ export class Board {
       case "b.asset":
         void this.receiveChunk(msg);
         return;
-      case "b.view":
-        if (this.followOn && typeof msg.page === "string" && [msg.cx, msg.cy, msg.w, msg.h].every((n) => Number.isFinite(n)) && msg.w > 0 && msg.h > 0) {
-          this.onRemoteView({ page: msg.page, cx: msg.cx, cy: msg.cy, w: msg.w, h: msg.h });
-        }
+      case "b.view": {
+        if (typeof msg.page !== "string" || ![msg.cx, msg.cy, msg.w, msg.h].every((n) => Number.isFinite(n)) || !(msg.w > 0 && msg.h > 0)) return;
+        const from = this.net.peerRole(peerId);
+        // The teacher follows the student's iPad: only its view counts (and it never follows anyone).
+        const follow = this.watchOn
+          ? from === "sipad" && this.role !== "sipad"
+          : this.followOn && !isStudentSide(from ?? "student");
+        if (follow) this.onRemoteView({ page: msg.page, cx: msg.cx, cy: msg.cy, w: msg.w, h: msg.h });
         return;
+      }
     }
     if (typeof msg.t === "string" && msg.t.startsWith("b.")) {
       if (msg.t === "b.sync" && !this.acceptLesson(msg.state?.lesson)) return;

@@ -75,6 +75,8 @@ export interface BoardState {
   lesson?: LessonInfo;
   /** on = the student's view follows the teacher's scroll / zoom. Missing = on. */
   follow?: { on: boolean; ts: number };
+  /** on = the teacher follows the student's own iPad (everyone shows what it shows). Missing = off. */
+  watch?: { on: boolean; ts: number };
 }
 
 export const PAGE_W = 1000;
@@ -120,6 +122,7 @@ export type BoardOp =
   | { t: "b.go"; page: string; ts: number }
   | { t: "b.lock"; on: boolean; ts: number }
   | { t: "b.follow"; on: boolean; ts: number }
+  | { t: "b.watch"; on: boolean; ts: number }
   | { t: "b.side"; side: SideFile }
   | { t: "b.sync"; state: BoardState };
 
@@ -179,6 +182,12 @@ export function applyOp(st: BoardState, op: BoardOp): boolean {
     case "b.follow":
       if (op.ts > (st.follow?.ts ?? 0)) {
         st.follow = { on: op.on, ts: op.ts };
+        return true;
+      }
+      return false;
+    case "b.watch":
+      if (op.ts > (st.watch?.ts ?? 0)) {
+        st.watch = { on: op.on, ts: op.ts };
         return true;
       }
       return false;
@@ -260,6 +269,10 @@ export function mergeState(st: BoardState, other: BoardState): boolean {
   }
   if (other.follow && other.follow.ts > (st.follow?.ts ?? 0)) {
     st.follow = { ...other.follow };
+    changed = true;
+  }
+  if (other.watch && other.watch.ts > (st.watch?.ts ?? 0)) {
+    st.watch = { ...other.watch };
     changed = true;
   }
   changed = mergeSide(st, other.side) || changed;

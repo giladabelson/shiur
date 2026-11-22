@@ -76,3 +76,26 @@ export function inviteDialog(room: string, fallbackName = "") {
   openDialog(dlg);
   return dlg;
 }
+
+/**
+ * Student (in the lesson): connect their own iPad. The QR code carries a one-time key, so the
+ * iPad comes straight in (the teacher already let this student in). The key arrives from the
+ * server a moment after the dialog opens.
+ */
+export function studentIpadDialog() {
+  const slot = h("div", { class: "qr-slot" }, h("p", { class: "muted" }, "מכין קוד…"));
+  const dlg = h("dialog", { class: "dlg student-ipad-dlg" },
+    h("h2", null, icon("ipad", 22), " חיבור האייפד שלך"),
+    h("p", null, "סרוק את הקוד עם המצלמה של האייפד, או פתח בו את הקישור ב-Safari."),
+    h("p", { class: "muted small" }, "באייפד כותבים על הלוח עם העט (אחרי שהמורה מאשר לכתוב), והמורה רואה בדיוק את מה שאתה עושה שם. המיקרופון והרמקול של האייפד כבויים, כדי שלא יהיה הד."),
+    slot,
+    h("div", { class: "row end" }, h("button", { class: "btn ghost", type: "button", onclick: () => dlg.close() }, "סגור")),
+  );
+  openDialog(dlg);
+  return {
+    dlg,
+    setUrl(url: string) {
+      slot.replaceChildren(qrBlock(url, 280, "qr-sipad"));
+    },
+  };
+}
