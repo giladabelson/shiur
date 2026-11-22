@@ -432,7 +432,8 @@ a { color: var(--accent); }
 
 /* ---------- invite dialog (teacher, in the lesson) ---------- */
 .row.end { justify-content: flex-end; }
-.invite-btn { margin-inline-start: auto; }
+.invite-btn, .student-ipad-btn { margin-inline-start: auto; }
+.student-ipad-btn.on { color: #13703a; border-color: #9fd9b4; background: #e3f6ea; }
 .invite-dlg { width: min(760px, calc(100vw - 32px)); overflow-y: auto; }
 .invite-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 12px; }
 .invite-part { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; }

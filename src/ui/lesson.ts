@@ -422,7 +422,7 @@ export function renderLesson(root: HTMLElement, roomId: string, role: Role) {
     // Student: connect their own iPad (a QR code to scan with it). The teacher then sees what they do there.
     const ipadBtn = role === "student"
       ? h("button", {
-        class: "btn ghost small-btn invite-btn student-ipad-btn", type: "button", title: "לכתוב על הלוח מהאייפד שלך",
+        class: "btn ghost small-btn student-ipad-btn", type: "button", title: "לכתוב על הלוח מהאייפד שלך",
         onclick: () => {
           if (room.lobby.kind !== "admitted") return toast("אפשר לחבר אייפד אחרי שהמורה מכניס אותך לשיעור");
           room.requestPairToken();
